@@ -2,8 +2,8 @@ from collections.abc import Iterable, Iterator
 from struct import iter_unpack
 from os import remove
 
-from adapters import HexAdapter, SQLAdapter, BLOBAdapter, CSVAdapter
-from wrapped import BasicCSV
+from .adapters import HexAdapter, SQLAdapter, BLOBAdapter, CSVAdapter
+from .wrapped import BasicCSV
 
 
 class IP6(HexAdapter, SQLAdapter):
