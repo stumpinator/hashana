@@ -663,12 +663,13 @@ class HashanaReplier(HashanaDBReader):
         """
         valid = set()
         for request in requests:
-            reqs = set(request.keys()) & set(self._valid_reqs.keys())
-            for req in reqs:
-                r = request[req].strip().lower()
-                if len(r) == self._valid_reqs[req].struct_size() * 2:
-                    h = self._valid_reqs[req](r)
-                    valid.add(h)
+            if isinstance(request, dict):
+                reqs = set(request.keys()) & set(self._valid_reqs.keys())
+                for req in reqs:
+                    r = request[req].strip().lower()
+                    if len(r) == self._valid_reqs[req].struct_size() * 2:
+                        h = self._valid_reqs[req](r)
+                        valid.add(h)
         return valid
     
     def process_requests(self, requests: Iterable[dict[str,str]]) -> dict[str,dict]:
@@ -692,26 +693,27 @@ class HashanaReplier(HashanaDBReader):
         assert self._conn is not None, "Not connected"
         replies = dict()
         for req in self.parse_requests(requests=requests):
+            key = str(req)
             try:
                 rowid = self.row_id(req)
             except ValueError:
                 # invalid hash i.e. text is not valid hex
-                replies[req] = "INVALID_HASH"
+                replies[key] = "INVALID_HASH"
                 continue
             except:
-                replies[req] = "ERROR_ROWID"
+                replies[key] = "ERROR_ROWID"
             
             if rowid is None:
-                replies[req] = None
+                replies[key] = None
                 continue
             
             try:
                 itm = cast(HashanaData, self.item_by_id(rowid, HashanaData))
             except:
                 # should probably never happen unless something breaks after getting rowid
-                replies[req] = "ERROR_UNKOWN"
+                replies[key] = "ERROR_UNKOWN"
             else:
-                replies[req] = itm.as_dict()
+                replies[key] = itm.as_dict()
         return replies
 
 if __name__ == "__main__":
