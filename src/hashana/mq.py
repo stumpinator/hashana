@@ -126,6 +126,9 @@ class HashanaZMQClient:
         self._client = None
     
     def __del__(self):
+        if self._tracking > 1:
+            self._tracking = 1
+        self.close()
         self._context.term()
     
     def __enter__(self):

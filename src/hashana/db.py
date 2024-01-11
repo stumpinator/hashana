@@ -627,8 +627,7 @@ class HashanaReplier(HashanaDBReader):
     _valid_reqs: dict[str,HexAdapter]
     
     def __init__(self, db_path: str, valid_requests: Iterable[HexAdapter] = None):
-        """_summary_
-
+        """
         Args:
             db_path (str): path to sqlite database
             valid_requests (Iterable[HexAdapter], optional): Which type of queries are valid for this handler. 
@@ -702,6 +701,7 @@ class HashanaReplier(HashanaDBReader):
                 continue
             except:
                 replies[key] = "ERROR_ROWID"
+                continue
             
             if rowid is None:
                 replies[key] = None
