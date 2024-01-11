@@ -1,0 +1,14 @@
+[Unit]
+Description=Hashana ZeroMQ Query Server
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+WorkingDirectory=/hashana
+User=root
+#ExecStartPre=/bin/sleep 5
+ExecStart=/hashana/hashana.sh
+
+[Install]
+WantedBy=network.target
