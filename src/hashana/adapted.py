@@ -206,6 +206,39 @@ class SHA1(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
+class SHA224(HexAdapter, SQLAdapter):
+    """SHA224 Hex/SQL Adapter"""
+    def __init__(self, hexed: str):
+        assert hexed is not None, "invalid digest"
+        super().__init__(hexed)
+        super(HexAdapter, self).__init__()
+    
+    @classmethod
+    def struct_layout(cls) -> str:
+        return "qqqi"
+    
+    @classmethod
+    def label(cls) -> str:
+        return "sha224"
+    
+    @classmethod
+    def sql_table_name(cls) -> str:
+        return "hashana"
+
+    @classmethod
+    def sql_columns(cls) -> dict[str,str]:
+        return dict(sha224_0=SQLAdapter.INT_DEFAULT,
+                    sha224_1=SQLAdapter.INT_DEFAULT,
+                    sha224_2=SQLAdapter.INT_DEFAULT,
+                    sha224_3=SQLAdapter.INT_DEFAULT)
+    
+    def as_sql_values(self) -> tuple:
+        return self.as_ints()
+
+    @classmethod
+    def from_sql_values(cls, *args):
+        return cls.from_ints(*args)
+
 class SHA256(HexAdapter, SQLAdapter):
     """SHA256 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
@@ -231,6 +264,78 @@ class SHA256(HexAdapter, SQLAdapter):
                     sha256_1=SQLAdapter.INT_DEFAULT,
                     sha256_2=SQLAdapter.INT_DEFAULT,
                     sha256_3=SQLAdapter.INT_DEFAULT)
+    
+    def as_sql_values(self) -> tuple:
+        return self.as_ints()
+
+    @classmethod
+    def from_sql_values(cls, *args):
+        return cls.from_ints(*args)
+
+class SHA384(HexAdapter, SQLAdapter):
+    """SHA384 Hex/SQL Adapter"""
+    def __init__(self, hexed: str):
+        assert hexed is not None, "invalid digest"
+        super().__init__(hexed)
+        super(HexAdapter, self).__init__()
+    
+    @classmethod
+    def struct_layout(cls) -> str:
+        return "qqqqqq"
+    
+    @classmethod
+    def label(cls) -> str:
+        return "sha384"
+    
+    @classmethod
+    def sql_table_name(cls) -> str:
+        return "hashana"
+
+    @classmethod
+    def sql_columns(cls) -> dict[str,str]:
+        return dict(sha384_0=SQLAdapter.INT_DEFAULT,
+                    sha384_1=SQLAdapter.INT_DEFAULT,
+                    sha384_2=SQLAdapter.INT_DEFAULT,
+                    sha384_3=SQLAdapter.INT_DEFAULT,
+                    sha384_4=SQLAdapter.INT_DEFAULT,
+                    sha384_5=SQLAdapter.INT_DEFAULT)
+    
+    def as_sql_values(self) -> tuple:
+        return self.as_ints()
+
+    @classmethod
+    def from_sql_values(cls, *args):
+        return cls.from_ints(*args)
+
+class SHA512(HexAdapter, SQLAdapter):
+    """SHA512 Hex/SQL Adapter"""
+    def __init__(self, hexed: str):
+        assert hexed is not None, "invalid digest"
+        super().__init__(hexed)
+        super(HexAdapter, self).__init__()
+    
+    @classmethod
+    def struct_layout(cls) -> str:
+        return "qqqqqqqq"
+    
+    @classmethod
+    def label(cls) -> str:
+        return "sha512"
+    
+    @classmethod
+    def sql_table_name(cls) -> str:
+        return "hashana"
+
+    @classmethod
+    def sql_columns(cls) -> dict[str,str]:
+        return dict(sha512_0=SQLAdapter.INT_DEFAULT,
+                    sha512_1=SQLAdapter.INT_DEFAULT,
+                    sha512_2=SQLAdapter.INT_DEFAULT,
+                    sha512_3=SQLAdapter.INT_DEFAULT,
+                    sha512_4=SQLAdapter.INT_DEFAULT,
+                    sha512_5=SQLAdapter.INT_DEFAULT,
+                    sha512_6=SQLAdapter.INT_DEFAULT,
+                    sha512_7=SQLAdapter.INT_DEFAULT)
     
     def as_sql_values(self) -> tuple:
         return self.as_ints()
