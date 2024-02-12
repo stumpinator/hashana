@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hashana"
-version = "0.2.0"
+dynamic = ["version"]
 authors = [
   { name="Gary Stump", email="gstumpjr@gmail.com" },
 ]
@@ -16,6 +16,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "hashana.__version__"}
 
 [project.optional-dependencies]
 zmq = ["zmq"]
