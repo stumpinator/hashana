@@ -716,5 +716,42 @@ class HashanaReplier(HashanaDBReader):
                 replies[key] = itm.as_dict()
         return replies
 
+class HashanaTFReplier(HashanaReplier):
+    def process_requests(self, requests: Iterable[dict[str,str]]) -> bool:
+        """Query database for all valid requests.
+
+        Args:
+            requests (Iterable[dict[str,str]]): collection of key/value pairs representing a query for the database.
+                key = label of adapter type
+                value = what to query for
+                e.g. [{'md5': 'd41d8cd98f00b204e9800998ecf8427e'}]
+
+        Returns:
+            bool: True if hash exists in database. False if it doesn't.
+                key = value from query
+                value = True/False
+                e.g.
+                [{'d41d8cd98f00b204e9800998ecf8427e': True},
+                {'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': False},
+                {'123abcxyz': 'False'}]
+        """
+        assert self._conn is not None, "Not connected"
+        replies = dict()
+        for req in self.parse_requests(requests=requests):
+            key = str(req)
+            try:
+                rowid = self.row_id(req)
+            except ValueError:
+                # invalid hash i.e. text is not valid hex
+                replies[key] = False
+                continue
+            except:
+                replies[key] = "ERROR_ROWID"
+                continue
+            
+            replies[key] = rowid is not None
+            
+        return replies
+
 if __name__ == "__main__":
     pass
