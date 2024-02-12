@@ -1,10 +1,9 @@
-import os
-from hashana.adapted import *
-from hashana.mq import *
+from os import getenv
+from hashana.mq import HashanaZMQServer
 
-hashana_home = os.getenv('HASHANA_HOME', '/hashana')
-hashana_db = os.getenv('HASHANA_DB', f"{hashana_home}/hashana.db")
-hashana_port = os.getenv('HASHANA_PORT', '5557')
+hashana_home = getenv('HASHANA_HOME', '/hashana')
+hashana_db = getenv('HASHANA_DB', f"{hashana_home}/hashana.db")
+hashana_port = getenv('HASHANA_PORT', '5557')
 
 server_endpoint = f"tcp://*:{hashana_port}"
 
