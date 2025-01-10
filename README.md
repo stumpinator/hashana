@@ -9,9 +9,13 @@ A front end of sorts is provided that allows easy querying via json. A zeromq fr
 
 Example to convert the RDS data (may take 1 hour or more depending on hardware):
 
-rds_list = [r"C:\NSRL\RDS_2023.12.1_modern_minimal.db", r"C:\NSRL\RDS_2023.12.1_legacy_minimal.db", r"C:\NSRL\RDS_2023.12.1_android_minimal.db", r"C:\NSRL\RDS_2023.12.1_ios_minimal.db"]
+```
+rds_list = [r"C:\NSRL\RDS_2023.12.1_modern_minimal.db", r"C:\NSRL\RDS_2023.12.1_legacy_minimal.db", \
+  r"C:\NSRL\RDS_2023.12.1_android_minimal.db", r"C:\NSRL\RDS_2023.12.1_ios_minimal.db"]
 HashanaRDSReader.make_hashana_db(rds_list, r"C:\NSRL\hashana_23.12.1.db")
+```
 
 
 Links:
-https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl/nsrl-download/rds-query
+
+[NSRL RDS Query](https://www.nist.gov/itl/ssd/software-quality-group/national-software-reference-library-nsrl/nsrl-download/rds-query)
