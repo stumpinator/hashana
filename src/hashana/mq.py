@@ -1,6 +1,7 @@
 import json
 #from threading import Event, Thread as Process
-from multiprocessing import Process, Event
+from multiprocessing import Process
+from multiprocessing.synchronize import Event
 from abc import abstractmethod, ABCMeta
 
 from hashana.db import HashanaReplier

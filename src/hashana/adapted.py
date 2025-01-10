@@ -4,13 +4,15 @@ from os import remove
 
 from .adapters import HexAdapter, SQLAdapter, BLOBAdapter, CSVAdapter
 from .wrapped import BasicCSV
+from .exceptions import InvalidHexError, InvalidIPAddressError, InvalidAdapterError
 
 
 class IP6(HexAdapter, SQLAdapter):
     """IPv6 Hex Adapter
     """
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid address"
+        if hexed is None:
+            raise InvalidHexError("Invalid Address")
         super().__init__(hexed)
     
     @classmethod
@@ -42,27 +44,29 @@ class IP6(HexAdapter, SQLAdapter):
         """Splits IPv6 address into list representing pieces of address as shorts.
 
         Args:
-            address (str): IPv6 address in string/text format. Can be shortened form
+            address (str): IPv6 address in string/text format. Can be shortened form. must be only address (no port)
 
         Raises:
-            Exception: Invalid Address
+            InvalidIPAddressError: Invalid string representation of an IP6 Address.
 
         Returns:
             tuple[str]: list of 8 strings representing pieces of address. Strings can be empty (meaning 0 or 0000)
         """
+        if ":::" in address:
+            raise InvalidIPAddressError("Invalid address: too many colons")
         split1 = address.strip().split('::')
         if len(split1) > 2:
-            raise Exception("Invalid address")
+            raise InvalidIPAddressError("Invalid address: multiple instances of ::")
         elif len(split1) == 1:
             h = split1[0].split(':')
             if len(h) != 8:
-                raise Exception("Invalid address")
+                raise InvalidIPAddressError("Invalid address: not wide enough")
         else:
             h = split1[0].split(':')
             h2 = split1[1].split(':')
             total = len(h) + len(h2)
             if total > 8:
-                raise Exception("Invalid address")
+                raise InvalidIPAddressError("Invalid address: too wide")
             h.extend('' for x in range(0, (8 - total)))
             h.extend(h2)
         return h
@@ -81,7 +85,8 @@ class MAC(HexAdapter, SQLAdapter):
     """MAC address hex adapter
     """
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid address"
+        if hexed is None:
+            raise InvalidHexError("Invalid Address")
         super().__init__(hexed.replace(':',''))
     
     @classmethod
@@ -113,7 +118,8 @@ class CRC32(HexAdapter, SQLAdapter):
     """CRC32 Hex Adapter
     """
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
     
     @classmethod
@@ -142,7 +148,8 @@ class CRC32(HexAdapter, SQLAdapter):
 class MD5(HexAdapter, SQLAdapter):
     """MD5 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -175,7 +182,8 @@ class MD5(HexAdapter, SQLAdapter):
 class SHA1(HexAdapter, SQLAdapter):
     """SHA1 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -209,7 +217,8 @@ class SHA1(HexAdapter, SQLAdapter):
 class SHA224(HexAdapter, SQLAdapter):
     """SHA224 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -242,7 +251,8 @@ class SHA224(HexAdapter, SQLAdapter):
 class SHA256(HexAdapter, SQLAdapter):
     """SHA256 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -275,7 +285,8 @@ class SHA256(HexAdapter, SQLAdapter):
 class SHA384(HexAdapter, SQLAdapter):
     """SHA384 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -310,7 +321,8 @@ class SHA384(HexAdapter, SQLAdapter):
 class SHA512(HexAdapter, SQLAdapter):
     """SHA512 Hex/SQL Adapter"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid digest"
+        if hexed is None:
+            raise InvalidHexError("Invalid digest")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -347,7 +359,8 @@ class SHA512(HexAdapter, SQLAdapter):
 class FileSize(HexAdapter, SQLAdapter):
     """Simple Hex/SQL Adapter for length/size/bytes"""
     def __init__(self, hexed: str):
-        assert hexed is not None, "invalid size"
+        if hexed is None:
+            raise InvalidHexError("Invalid size")
         super().__init__(hexed)
         super(HexAdapter, self).__init__()
     
@@ -561,7 +574,8 @@ class AdaptedCSV(BasicCSV):
             path (str): path to CSV file where data will be read/write
             csv_adapter (CSVAdapter): adapter class to convert to/from csv lines
         """
-        assert issubclass(csv_adapter, CSVAdapter), "Adapter must support CSVAdapter interface"
+        if not issubclass(csv_adapter, CSVAdapter):
+            raise InvalidAdapterError("Adapter must support CSVAdapter interface")
         super().__init__(path)
         self._csv_adapter = csv_adapter
         

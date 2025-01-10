@@ -8,6 +8,7 @@ from .adapters import SQLAdapter, TableAdapter, HexAdapter, GroupAdapter
 from .adapted import HBuffer, FileSize, MD5, SHA1, SHA256
 from .wrapped import RDSReader
 from .hasher import Hasher
+from .exceptions import InvalidHexError, NotConnectedError, InvalidIPAddressError, InvalidAdapterError
 
 HASH_ZERO_LENGTH = {'file_size': 0, 
                     'md5': 'd41d8cd98f00b204e9800998ecf8427e', 
@@ -97,7 +98,7 @@ class HashanaDBReader:
         self._tracking = 0
         self._pathobj = Path(self._path)
         if not self._pathobj.exists():
-            raise ValueError("Path is not a valid file")
+            raise FileNotFoundError("Path is not a valid file")
         
     def __enter__(self):
         self.connect()
@@ -173,16 +174,18 @@ class HashanaDBReader:
             hasher (Hasher): hasher instance used to hash the bytes and produce report
 
         Raises:
-            ValueError: Hex or SQL adapter class is not correct type
+            InvalidAdapterError: Hex or SQL adapter class is not correct type
+            NotConnectedError: no connection
 
         Returns:
             dict: report of hashed bytestream
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if not issubclass(sql_class, SQLAdapter):
-            raise ValueError("Adapter must support SQLAdapter interface")
+            raise InvalidAdapterError("Adapter must support SQLAdapter interface")
         if not issubclass(hex_class, HexAdapter):
-            raise ValueError("Adapter must support HexAdapter interface")
+            raise InvalidAdapterError("Adapter must support HexAdapter interface")
         sql_adapter = cast(SQLAdapter, sql_class)
         hex_adapter = cast(HexAdapter, hex_class)
         # get all items, ordered, and convert to bytes to hash
@@ -198,14 +201,16 @@ class HashanaDBReader:
             sql_item (SQLAdapter): item to check. this is an instance of the item not the class itself.
 
         Raises:
-            ValueError: sql_item is not instance of SQLAdapter
+            InvalidAdapterError: sql_item is not instance of SQLAdapter
+            NotConnectedError: no connection
             
         Returns:
             bool: True if exists at least once in database. otherwise False
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if not isinstance(sql_item, SQLAdapter):
-            raise ValueError("Item instance does not support SQLAdapter interface")
+            raise InvalidAdapterError("Item instance does not support SQLAdapter interface")
         db_entries = self._conn.execute(sql_item.sql_has_entry(), sql_item.as_sql_values()).fetchone()[0]
         return db_entries >= 1
     
@@ -216,14 +221,16 @@ class HashanaDBReader:
             sql_class (SQLAdapter): Data class to count. Must be a subclass of SQLAdapter
 
         Raises:
-            ValueError: sql_class is not subclass of SQLAdapter
+            InvalidAdapterError: sql_class is not subclass of SQLAdapter
+            NotConnectedError: no connection
             
         Returns:
             int: Number of entries for sql_class in database
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if not issubclass(sql_class, SQLAdapter):
-            raise ValueError("Class must support SQLAdapter interface")
+            raise InvalidAdapterError("Class must support SQLAdapter interface")
         sql_class = cast(SQLAdapter, sql_class)
         db_entries = self._conn.execute(sql_class.sql_item_count()).fetchone()[0]
         return db_entries
@@ -236,14 +243,16 @@ class HashanaDBReader:
             ordered (bool, optional): Should the sql statement add ORDER BY. Defaults to False.
 
         Raises:
-            ValueError: sql_class is not subclass of SQLAdapter
+            InvalidAdapterError: sql_class is not subclass of SQLAdapter
+            NotConnectedError: no connection
 
         Yields:
             Iterator: Instances of sql_class type with database values
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if not issubclass(sql_class, SQLAdapter):
-            raise ValueError("Class must support SQLAdapter interface")
+            raise InvalidAdapterError("Class must support SQLAdapter interface")
         sql_class = cast(SQLAdapter, sql_class)
         if ordered:
             sql = sql_class.sql_select_all_ordered()
@@ -259,18 +268,22 @@ class HashanaDBReader:
             sql_item (SQLAdapter): Item to retrieve. this is an instance of the item not the class itself.
 
         Raises:
-            ValueError: sql_item is not instance of SQLAdapter
+            NotConnectedError: no connection
+            InvalidHexError: could not convert hex into sql
+            InvalidAdapterError: sql_item does not support SQLAdapter interface
 
         Returns:
             int: rowid if exists, otherwise None
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if not isinstance(sql_item, SQLAdapter):
-            raise ValueError("Item instance does not support SQLAdapter interface")
+            raise InvalidAdapterError("Item instance does not support SQLAdapter interface")
+        
         try:
             sql_val = sql_item.as_sql_values()
         except:
-            raise ValueError("Invalid hex string")
+            raise InvalidHexError("Invalid hex string")
         row = self._conn.execute(sql_item.sql_select(), sql_val).fetchone()
         if row is not None:
             return row[0]
@@ -285,14 +298,16 @@ class HashanaDBReader:
             sql_class (SQLAdapter): Data class to return. Must be a subclass of SQLAdapter
 
         Raises:
-            ValueError: sql_class is not subclass of SQLAdapter
+            InvalidAdapterError: sql_class is not subclass of SQLAdapter
+            NotConnectedError: no connection
 
         Returns:
             SQLAdapter: Data class of specified type if item exists, otherwise None
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if not issubclass(sql_class, SQLAdapter):
-            raise ValueError("Class must support SQLAdapter interface")
+            raise InvalidAdapterError("Class must support SQLAdapter interface")
         sql_class = cast(SQLAdapter, sql_class)
         row = self._conn.execute(sql_class.sql_select_by_id(), (rowid,)).fetchone()
         if row is not None:
@@ -376,7 +391,8 @@ class HashanaDBWriter:
         return None
 
     def commit(self):
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         self._conn.commit()
     
     def create_tables(self, tables:Iterable[TableAdapter]) -> set[TableAdapter]:
@@ -388,7 +404,8 @@ class HashanaDBWriter:
         Returns:
             set[TableAdapter]: _description_
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         created = set()
         for tbl in tables:
             if tbl not in created:
@@ -405,7 +422,8 @@ class HashanaDBWriter:
         Returns:
             set[TableAdapter]: number of CREATE INDEX statements executed. does not determine if previously created.
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         created = set()
         for tbl in indexes:
             if tbl not in created:
@@ -439,16 +457,18 @@ class HashanaDBWriter:
             clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
         
         Raises:
-            ValueError: sql_class is not subclass of SQLAdapter
+            InvalidAdapterError: sql_class is not subclass of SQLAdapter
+            NotConnectedError: no connection
             
         Returns:
             int: number of new items added to database
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         if len(buffer) <= 0:
             return 0
         if not issubclass(sql_class, SQLAdapter):
-            raise ValueError("Adapter must support SQLAdapter interface")
+            raise InvalidAdapterError("Adapter must support SQLAdapter interface")
         sql_class = cast(SQLAdapter, sql_class)
         inserted = self._conn.executemany(sql_class.sql_insert(), buffer.as_tuples()).rowcount
         
@@ -467,7 +487,8 @@ class HashanaDBWriter:
         Returns:
             int: number of new items added to database
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         inserted = 0
         for itm in hash_items:
             inserted += self._conn.execute(itm.sql_insert(), itm.as_sql_values()).rowcount
@@ -634,13 +655,13 @@ class HashanaReplier(HashanaDBReader):
                 Defaults to None which uses defaults (MD5, SHA1, and SHA256).
 
         Raises:
-            ValueError: invalid request type
+            InvalidAdapterError: invalid request type
         """
         if valid_requests:
             self._valid_reqs = dict()
             for req in valid_requests:
                 if not callable(req) or not issubclass(req, HexAdapter):
-                    raise ValueError("Hash request must be HexAdapter, callable, and have associated hash algorithm in Hasher")
+                    raise InvalidAdapterError("Hash request must be HexAdapter, callable, and have associated hash algorithm in Hasher")
                 req = cast(HexAdapter, req)
                 self._valid_reqs[req.label()] = req
         else:
@@ -689,13 +710,14 @@ class HashanaReplier(HashanaDBReader):
                 {'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': None},
                 {'123abcxyz': 'INVALID_HASH'}]
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         replies = dict()
         for req in self.parse_requests(requests=requests):
             key = str(req)
             try:
                 rowid = self.row_id(req)
-            except ValueError:
+            except InvalidHexError:
                 # invalid hash i.e. text is not valid hex
                 replies[key] = "INVALID_HASH"
                 continue
@@ -735,13 +757,14 @@ class HashanaTFReplier(HashanaReplier):
                 {'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': False},
                 {'123abcxyz': 'False'}]
         """
-        assert self._conn is not None, "Not connected"
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
         replies = dict()
         for req in self.parse_requests(requests=requests):
             key = str(req)
             try:
                 rowid = self.row_id(req)
-            except ValueError:
+            except InvalidHexError:
                 # invalid hash i.e. text is not valid hex
                 replies[key] = False
                 continue

@@ -3,6 +3,8 @@ from collections.abc import Iterable, Iterator
 from struct import pack, unpack, calcsize
 from typing import cast
 
+from .exceptions import MissingKeywordError
+
 
 class SQLAdapter(metaclass=ABCMeta):
     """Abstract class/interface for interacting with data in sqlite3
@@ -463,7 +465,7 @@ class HexAdapter(metaclass=ABCMeta):
         if key in kwds:
             return cls(kwds[key])
         else:
-            raise ValueError(f"Missing keyword {key}")
+            raise MissingKeywordError(f"Missing keyword {key}")
 
 class CSVAdapter(metaclass=ABCMeta):
     """Used for converting data class to/from csv file
@@ -640,7 +642,7 @@ class GroupAdapter(HexAdapter, TableAdapter, CSVAdapter, metaclass=ABCMeta):
             if key in kwds:
                 hexes.append(cast(HexAdapter, kwds[key]).hexed)
             else:
-                raise ValueError(f"Missing keyword: {key}")
+                raise MissingKeywordError(f"Missing keyword: {key}")
         return cls(''.join(hexes))
     
     def as_pieces(self) -> tuple[HexAdapter]:
@@ -666,7 +668,7 @@ class GroupAdapter(HexAdapter, TableAdapter, CSVAdapter, metaclass=ABCMeta):
             if key in kwds:
                 hexes.append(kwds[key])
             else:
-                raise ValueError(f"Missing keyword: {key}")
+                raise MissingKeywordError(f"Missing keyword: {key}")
         return cls(''.join(hexes))
     
     # HexAdapter
