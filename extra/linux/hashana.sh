@@ -1,9 +1,6 @@
 #!/bin/bash
-export HASHANA_HOME='/hashana'
-export HASHANA_VENV="${HASHANA_HOME}/venv"
-export HASHANA_PORT='5557'
-export HASHANA_PY='zmq_server.py'
+export HASHANA_HOME=${HASHANA_HOME:-/hashana}
+export HASHANA_PORT=${HASHANA_PORT:-5557}
+export HASHANA_PYTHON=${HASHANA_PYTHON:-python}
 
-cd $HASHANA_HOME
-source "${HASHANA_VENV}/bin/activate"
-python ${HASHANA_PY}
+"${HASHANA_PYTHON}" "${HASHANA_HOME}/zmq_server.py"

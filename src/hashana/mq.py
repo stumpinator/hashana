@@ -1,7 +1,7 @@
 import json
 #from threading import Event, Thread as Process
-from multiprocessing import Process
-from multiprocessing.synchronize import Event
+from multiprocessing import Process, Event
+from multiprocessing.synchronize import Event as EventClass
 from abc import abstractmethod, ABCMeta
 
 from hashana.db import HashanaReplier
@@ -17,7 +17,7 @@ else:
 class ZMQService(metaclass=ABCMeta):
     """Abstract class for creating zeromq services"""
     _svc_thread: Process
-    _stop_evt: Event
+    _stop_evt: EventClass
     
     def __init__(self):
         if not _has_zmq:
@@ -101,7 +101,7 @@ class HashanaZMQBroker(ZMQService):
                 poll_timeout: int = 2000, 
                 message_size: int = 1024, 
                 zmq_context: zmq.Context = None,
-                stop_event: Event = None):
+                stop_event: EventClass = None):
         context = zmq_context or zmq.Context()
         stop = stop_event or Event()
         frontend = context.socket(zmq.ROUTER)
@@ -157,19 +157,22 @@ class HashanaZMQReplier(ZMQService):
     _zmq_url: str
     _db_path: str
     _worker: bool
+    _db_replier: HashanaReplier
     
     def __init__(self, 
                  zmq_url: str, 
                  db_path: str, 
                  recv_timeout: int = 1000, 
                  message_size: int = 1024,
-                 worker: bool = False):
+                 worker: bool = False,
+                 db_replier=None):
         super().__init__()
         self._msg_size = message_size
         self._rcv_timeo = recv_timeout
         self._zmq_url = zmq_url
         self._db_path = db_path
         self._worker = worker
+        self._db_replier = db_replier
         
     @staticmethod
     def service(zmq_url: str, 
@@ -177,7 +180,7 @@ class HashanaZMQReplier(ZMQService):
                 recv_timeout: int = 2000, 
                 message_size: int = 1024,
                 zmq_context: zmq.Context = None,
-                stop_event: Event = None,
+                stop_event: EventClass = None,
                 worker: bool = False,
                 db_replier = None):
         context = zmq_context or zmq.Context()
@@ -239,7 +242,7 @@ class HashanaZMQReplier(ZMQService):
                 "zmq_context": None, 
                 "stop_event": self._stop_evt,
                 "worker": self._worker,
-                "db_replier": None}
+                "db_replier": self._db_replier}
 
 class HashanaZMQServer(HashanaZMQReplier):
     """Standalone replier. Will listen on url and accept REQ connections directly"""

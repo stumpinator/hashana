@@ -200,7 +200,7 @@ class SQLAdapter(metaclass=ABCMeta):
         """
         raise NotImplementedError
     
-class TableAdapter(SQLAdapter, metaclass=ABCMeta):
+class TableAdapter(metaclass=ABCMeta):
     """Abstract class/interface for creating tables and indexes in a sqlite3 database
     """
     
@@ -264,6 +264,15 @@ class TableAdapter(SQLAdapter, metaclass=ABCMeta):
         """
         for k in cls.sql_indexes().keys():
             yield f"DROP INDEX IF EXISTS {k}"
+    
+    @classmethod
+    @abstractmethod
+    def sql_table_name(cls) -> str:
+        """
+        Returns:
+            str: table name used for generating sql statements
+        """
+        raise NotImplementedError
     
     @classmethod
     @abstractmethod
@@ -609,7 +618,7 @@ class BLOBAdapter(metaclass=ABCMeta):
         """resets underlying storage"""
         raise NotImplementedError
 
-class GroupAdapter(HexAdapter, TableAdapter, CSVAdapter, metaclass=ABCMeta):
+class GroupAdapter(HexAdapter, SQLAdapter, TableAdapter, CSVAdapter, metaclass=ABCMeta):
     """combines multiple data types for use in database/csv
     """
     _struct_layout: str = None

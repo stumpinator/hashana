@@ -8,7 +8,7 @@ from .adapters import SQLAdapter, TableAdapter, HexAdapter, GroupAdapter
 from .adapted import HBuffer, FileSize, MD5, SHA1, SHA256
 from .wrapped import RDSReader
 from .hasher import Hasher
-from .exceptions import InvalidHexError, NotConnectedError, InvalidIPAddressError, InvalidAdapterError
+from .exceptions import InvalidHexError, NotConnectedError, InvalidAdapterError
 
 HASH_ZERO_LENGTH = {'file_size': 0, 
                     'md5': 'd41d8cd98f00b204e9800998ecf8427e', 
