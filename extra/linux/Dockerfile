@@ -16,7 +16,6 @@ RUN rm requirements.txt
 RUN pip install $HASHANA_WHEEL
 RUN rm $HASHANA_WHEEL
 
-#ENV NAME=HashanaZMQ
 ENV HASHANA_HOME=/hashana
 ENV HASHANA_DB=/hashana/hashana.db
 ENV HASHANA_PORT=5557
