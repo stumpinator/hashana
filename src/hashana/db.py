@@ -4,11 +4,12 @@ from typing import cast
 from struct import pack
 from pathlib import Path
 
-from .adapters import SQLAdapter, TableAdapter, HexAdapter, GroupAdapter
-from .adapted import HBuffer, FileSize, MD5, SHA1, SHA256
+from .adapters import SQLAdapter, TableAdapter, HexAdapter, GroupAdapterB, ByteAdapter, ByteOrder
+from .adapted import FileSizeB, MD5B, SHA1B, SHA256B, HBufferB, BLOBFileB
 from .wrapped import RDSReader
 from .hasher import Hasher
 from .exceptions import InvalidHexError, NotConnectedError, InvalidAdapterError
+
 
 HASH_ZERO_LENGTH = {'file_size': 0, 
                     'md5': 'd41d8cd98f00b204e9800998ecf8427e', 
@@ -16,27 +17,30 @@ HASH_ZERO_LENGTH = {'file_size': 0,
                     'sha256': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'}
 
 
-class HashanaData(GroupAdapter):
-    """combines multiple metadata for use in hashana database/csv
+class HashanaDataB(GroupAdapterB):
+    """combines multiple metadata for use in hashana database/csv.
+        uses bytes for backing data.
     """
-    def __init__(self, hexed: str):
-        super().__init__(hexed)
+    default_label: str = "hashana"
+    default_table_name = "hashana"
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
 
     @classmethod
     def data_types(cls) -> Iterator[SQLAdapter]:
         # guarantees order when iterating
-        yield FileSize
-        yield MD5
-        yield SHA1
-        yield SHA256
+        yield FileSizeB
+        yield MD5B
+        yield SHA1B
+        yield SHA256B
     
     @classmethod
-    def label(cls) -> str:
-        return "hashana"
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
+    def from_rds_row(cls, **kwds):
+        buffer = bytearray(pack(FileSizeB.structure('!'), int((kwds['file_size']))))
+        buffer += bytes.fromhex(kwds['md5'])
+        buffer += bytes.fromhex(kwds['sha1'])
+        buffer += bytes.fromhex(kwds['sha256'])
+        return cls(buffer, byte_order=ByteOrder.NET)
     
     @classmethod
     def from_keywords(cls, **kwds):
@@ -44,48 +48,48 @@ class HashanaData(GroupAdapter):
         expected_keywords = set('file_size', 'md5', 'sha1', 'sha256')
 
         Returns:
-            HashanaData
+            HashanaDataB
         """
-        key = FileSize.label()
-        # convert easier to read integer to FileSize hex
-        kwds[key] = FileSize.from_ints(kwds[key]).hexed
-        return super().from_keywords(**kwds)
-
+        objs = list()
+        objs.append(FileSizeB.from_ints(kwds[FileSizeB.label()]))
+        objs.append(MD5B(bytes.fromhex(kwds[MD5B.label()])))
+        objs.append(SHA1B(bytes.fromhex(kwds[SHA1B.label()])))
+        objs.append(SHA256B(bytes.fromhex(kwds[SHA256B.label()])))
+        return super().from_objs(*objs, byte_order=kwds.get('byte_order', None))
+        
     def as_dict(self) -> dict:
-        key = FileSize.label()
-        d = super().as_dict()
-        # convert FileSize hex to easier to read integer
-        d[key] = FileSize(d[key]).as_ints()[0]
-        return d
+        ret = dict()
+        ret['byte_order'] = self._stored_order
+        objs: list[ByteAdapter] = [x for x in self.as_objs()]
+        ret[FileSizeB.label()] = objs[0].as_ints()[0]
+        ret[MD5B.label()] = objs[1].as_hex()
+        ret[SHA1B.label()] = objs[2].as_hex()
+        ret[SHA256B.label()] = objs[3].as_hex()
+        return ret
     
     def as_csv_line(self) -> str:
-        offset = 0
-        itms = list()
-        for dt in self.data_types():
-            end = offset + (cast(HexAdapter, dt).struct_size() * 2)
-            if dt == FileSize:
-                # write FileSize as integer instead of hex
-                itms.append(str(FileSize(self._hexed[offset:end]).as_ints()[0]))
-            else:
-                itms.append(self._hexed[offset:end])
-            offset = end
+        objs: list[ByteAdapter] = [x for x in self.as_objs()]
+        itms = [str(objs.pop(0).as_ints()[0])]
+        for o in objs:
+            itms.append(o.as_hex())
         return ','.join(itms) + '\n'
     
     @classmethod
     def from_csv_line(cls, line: str):
         values = line.strip().split(',')
-        d = dict(zip(cls.valid_keys(), values))
-        key = FileSize.label()
-        # FileSize is written as an integer instead of hex. coverted in from_keywords
-        d[key] = int(d[key])
-        return cls.from_keywords(**d)
+        buffer = bytearray(pack(FileSizeB.structure('!'), int((int(values[0])))))
+        buffer += bytes.fromhex(values[1])
+        buffer += bytes.fromhex(values[2])
+        buffer += bytes.fromhex(values[3])
+        return cls(buffer, byte_order=ByteOrder.NET)
+
 
 class HashanaDBReader:
     """Interface to read hashana sqlite database.
     """
     _path: str
     _pathobj: Path
-    _conn: object
+    _conn: sqlite3.Connection
     _tracking: int
     
     def __init__(self, path: str):
@@ -144,37 +148,38 @@ class HashanaDBReader:
     def connected(self) -> bool:
         return self._conn is not None
     
-    def calculate_signature(self, hex_sql_class, hasher: Hasher) -> dict:
+    def calculate_signature(self, adapter: ByteAdapter|HexAdapter|SQLAdapter, hasher: Hasher) -> dict:
         """hack clone of the dbhash program. determines if *contents* of database have changed.
         it is not reading the database file itself.
         it produces consistent results but it is slow if the database has many rows and/or no index.
         wrapper for calculate_signature_hex_sql
 
         Args:
-            hex_sql_class (_type_): the entries you want to check for consistency.
-                must be both HexAdapter and SQLAdapter
+            adapter (ByteAdapter|HexAdapter|SQLAdapter): class to determine packing and sql statements.
+                must extend both SQLAdapater plus (ByteAdapter OR HexAdapter)
             hasher (Hasher): hasher instance used to hash the bytes and produce report
 
         Raises:
-            ValueError: hex_sql_class is not both HexAdapter and SQLAdapter
+            NotConnectedError: no connection
 
         Returns:
             dict: report of hashed bytestream
         """
-        return self.calculate_signature_hex_sql(hex_class=hex_sql_class, sql_class=hex_sql_class, hasher=hasher)
+        return self.calculate_signature_hex_sql(structure=adapter.structure(), 
+                                                select_all_sql=adapter.sql_select_all_ordered(), 
+                                                hasher=hasher)
     
-    def calculate_signature_hex_sql(self, hex_class: HexAdapter, sql_class: SQLAdapter, hasher: Hasher) -> dict:
+    def calculate_signature_hex_sql(self, structure: str, select_all_sql: str, hasher: Hasher) -> dict:
         """hack clone of the dbhash program. determines if *contents* of database have changed.
         it is not reading the database file itself.
         it produces consistent results but it is slow if the database has many rows and/or no index.
 
         Args:
-            hex_class (HexAdapter): adapter used to pack entries into bytes. typically same as sql_class
-            sql_class (SQLAdapter): adapter used to select items from database. typically same as hex_class
+            structure (str): how to pack data. see ByteAdapter or struct
+            select_all_sql (str): sql command to select all items. ORDER BY should be included for consistency
             hasher (Hasher): hasher instance used to hash the bytes and produce report
 
         Raises:
-            InvalidAdapterError: Hex or SQL adapter class is not correct type
             NotConnectedError: no connection
 
         Returns:
@@ -182,15 +187,9 @@ class HashanaDBReader:
         """
         if self._conn is None:
             raise NotConnectedError("Not connected")
-        if not issubclass(sql_class, SQLAdapter):
-            raise InvalidAdapterError("Adapter must support SQLAdapter interface")
-        if not issubclass(hex_class, HexAdapter):
-            raise InvalidAdapterError("Adapter must support HexAdapter interface")
-        sql_adapter = cast(SQLAdapter, sql_class)
-        hex_adapter = cast(HexAdapter, hex_class)
         # get all items, ordered, and convert to bytes to hash
-        bytestream = map(lambda tpl: pack(hex_adapter.structure(), *tpl), 
-                        self._conn.execute(sql_adapter.sql_select_all_ordered()))
+        bytestream = map(lambda tpl: pack(structure, *tpl), 
+                        self._conn.execute(select_all_sql))
         d = hasher.hash_byte_chunks(bytestream)
         return d
     
@@ -315,11 +314,12 @@ class HashanaDBReader:
         else:
             return None
 
+
 class HashanaDBWriter:
     """Interface to create/modify hashana sqlite database.
     """
     _path: str
-    _conn: object
+    _conn: sqlite3.Connection
     _autocommit: bool
     _tracking: int
     _synchronous: str
@@ -379,6 +379,109 @@ class HashanaDBWriter:
     def autocommit(self):
         return self._autocommit
     
+    def import_blob(self,
+                    blob_file: str,
+                    adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
+                    initialize: bool = False,
+                    create_indexes: bool = False,
+                    commit: bool = False,
+                    byte_order: str = None,
+                    trackset: set = None) -> tuple[set,int]:
+        """Import data from a blobof data
+        
+        Args:
+            blob_file (str): path to blob file
+            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
+                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
+            initialize (bool): create tables defined in adapter. this happens before any other db ops
+            create_indexes (bool): create indexes defined in TableAdapter. This occurs at the end
+            commit (bool): perform a commit. this happens after all insertions but before creating indexes
+            byte_order (str): byte order of data in blob
+            trackset (set): set of hashes used for tracking duplicates across multiple files.
+                one will be created if this is None.
+                this will be returned (with additions) when import process completes
+        
+        Returns:
+            tuple[set,int] - trackset and total inserted
+        """
+        trackset = trackset or set()
+        
+        if initialize:
+            self.create_tables([adapter])
+        
+        blobfile = BLOBFileB(adapter=adapter, file_path=blob_file, byte_order=byte_order)
+        sqlinsert = adapter.sql_insert()
+        
+        for i in blobfile.items():
+            hashid = hash(i)
+            if hashid in trackset:
+                continue
+            trackset.add(hashid)
+            self._conn.execute(sqlinsert, i.as_sql_values())
+        
+        if commit:
+            self.commit()
+        
+        if create_indexes:
+            self.create_indexes([adapter])
+        
+        return trackset, len(trackset)
+    
+    def import_rds(self,
+                    rds_file: str,
+                    adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
+                    initialize: bool = False,
+                    create_indexes: bool = False,
+                    commit: bool = False,
+                    trackset: set = None) -> tuple[set,int]:
+        """Import data from a NSRL RDS data set.
+        
+        Args:
+            rds_file (str): path to rds file
+            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
+                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
+            initialize (bool): create tables defined in adapter. this happens before any other db ops
+            create_indexes (bool): create indexes defined in TableAdapter. This occurs at the end
+            commit (bool): perform a commit. this happens after all insertions but before creating indexes
+            trackset (set): set of hashes used for tracking duplicates across multiple files.
+                one will be created if this is None.
+                this will be returned (with additions) when import process completes
+        
+        Returns:
+            tuple[set,int] - trackset and total inserted
+        """
+        trackset = trackset or set()
+        
+        buffr = HBufferB(adapter, size=1024, byte_order='!')
+        inserted = 0
+        
+        if initialize:
+            self.create_tables([adapter])
+            
+        rds = HashanaRDSReaderB(rds_file)
+        
+        for ds in rds.enum_all():
+            hashid = hash((ds['file_size'],ds['md5'],ds['sha1'],ds['sha256']))
+            #hashid = hash(ds['sha256'])
+            if hashid in trackset:
+                continue
+            trackset.add(hashid)
+            buffr.add_bytes(pack(FileSizeB.structure('!'), int((ds['file_size']))))
+            buffr.add_bytes(bytes.fromhex(ds['md5']))
+            buffr.add_bytes(bytes.fromhex(ds['sha1']))
+            buffr.add_bytes(bytes.fromhex(ds['sha256']))
+            if buffr.full:
+                inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
+        inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
+        
+        if commit:
+            self.commit()
+        
+        if create_indexes:
+            self.create_indexes([adapter])
+        
+        return trackset, inserted
+        
     def close(self, commit: bool = False):
         if self._conn is not None:
             if commit:
@@ -432,12 +535,12 @@ class HashanaDBWriter:
                     self._conn.execute(idx)
         return created
 
-    def insert_buffer(self, buffer: HBuffer, clear: bool = False) -> int:
+    def insert_buffer(self, buffer: HBufferB, clear: bool = False) -> int:
         """inserts multiple items to the database using a buffer. single transaction.
         wrapper for insert_buffer_class
         
         Args:
-            buffer (HBuffer): buffer item to be inserted. 
+            buffer (HBufferB): buffer item to be inserted. 
             clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
         
         Raises:
@@ -446,13 +549,13 @@ class HashanaDBWriter:
         Returns:
             int: number of new items added to database
         """
-        return self.insert_buffer_class(buffer=buffer, sql_class=buffer.hex_adapter, clear=clear)
+        return self.insert_buffer_class(buffer=buffer, sql_class=buffer.adapter, clear=clear)
     
-    def insert_buffer_class(self, buffer: HBuffer, sql_class: SQLAdapter, clear: bool = False):
+    def insert_buffer_class(self, buffer: HBufferB, sql_class: SQLAdapter, clear: bool = False):
         """inserts multiple items to the database using a buffer. single transaction.
 
         Args:
-            buffer (HBuffer): buffer item to be inserted.
+            buffer (HBufferB): buffer item to be inserted.
             sql_class (SQLAdapter): data class to insert into database
             clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
         
@@ -467,8 +570,8 @@ class HashanaDBWriter:
             raise NotConnectedError("Not connected")
         if len(buffer) <= 0:
             return 0
-        if not issubclass(sql_class, SQLAdapter):
-            raise InvalidAdapterError("Adapter must support SQLAdapter interface")
+        #if not issubclass(sql_class, SQLAdapter):
+        #    raise InvalidAdapterError("Adapter must support SQLAdapter interface")
         sql_class = cast(SQLAdapter, sql_class)
         inserted = self._conn.executemany(sql_class.sql_insert(), buffer.as_tuples()).rowcount
         
@@ -526,13 +629,15 @@ class HashanaDBWriter:
         self.commit()
         self._conn.execute("detach database dba")
 
-class HashanaRDSReader(RDSReader):
+
+class HashanaRDSReaderB(RDSReader):
     """Reads NSRL RDS sqlite database and converts data to HashanaData
     """
+    
     def __init__(self, path):
         super().__init__(path)
 
-    def enum_hashana_data(self, distinct: bool = False) -> Iterator[HashanaData]:
+    def enum_hashana_data(self, distinct: bool = False) -> Iterator[HashanaDataB]:
         """Create HashanaData object for every entry in the RDS Database
 
         Args:
@@ -542,7 +647,7 @@ class HashanaRDSReader(RDSReader):
             Iterator[HashanaData]: converted rds metadata
         """
         for d in self.enum_all(distinct=distinct):
-            yield HashanaData.from_keywords(**d)
+            yield HashanaDataB.from_rds_row(**d)
     
     def enum_blobs(self, buff_size: int = 4096, distinct: bool = False) -> Iterator[memoryview]:
         """Enumerates RDS data into chunks (blobs)
@@ -554,16 +659,16 @@ class HashanaRDSReader(RDSReader):
         Yields:
             Iterator[memoryview]: converted rds metadata in binary form. read only.
         """
-        hb = HBuffer(HashanaData, buff_size)
+        hb = HBufferB(HashanaDataB, buff_size)
         for i in self.enum_hashana_data(distinct=distinct):
-            hb.add_hex(i)
+            hb.add_adapted(i)
             if hb.full:
                 yield hb.snapshot()
                 hb.clear()
         if len(hb) > 0:
             yield hb.snapshot()
 
-    def enum_buffers(self, buff_size: int = 4096, distinct: bool = False) -> Iterator[HBuffer]:
+    def enum_buffers(self, buff_size: int = 4096, distinct: bool = False) -> Iterator[HBufferB]:
         """Enumerates RDS data into buffers. Similar to enum_blobs but each item in iterator is separate HBuffer instance
 
         Args:
@@ -574,9 +679,42 @@ class HashanaRDSReader(RDSReader):
             Iterator[HBuffer]: converted rds metadata as buffers
         """
         for mv in self.enum_blobs(buff_size=buff_size, distinct=distinct):
-            hb = HBuffer(HashanaData, buff_size)
+            hb = HBufferB(HashanaDataB, buff_size)
             hb.add_bytes(mv)
             yield hb
+
+    def save_blob(self, output_file: str, append: bool = True, trackset: set | None = None) -> tuple[set,int]:
+        """Saves RDS items into a binary blob file
+        """        
+        trackset = trackset or set()
+        total_bytes = 0
+        op = Path(output_file)
+        if op.exists() and op.is_dir():
+            raise FileNotFoundError("output file is a directory")
+        
+        if append:
+            out_file = open(op.absolute(), 'ba')
+        else:
+            out_file = open(op.absolute(), 'wb')
+            
+        for ds in self.enum_all():
+            hashid = hash((ds['file_size'],
+                       ds['md5'].lower(),
+                       ds['sha1'].lower(),
+                       ds['sha256'].lower()))
+            if hashid in trackset:
+                continue
+            
+            trackset.add(hashid)
+            
+            total_bytes += out_file.write(pack(FileSizeB.structure('!'), int((ds['file_size']))))
+            total_bytes += out_file.write(bytes.fromhex(ds['md5']))
+            total_bytes += out_file.write(bytes.fromhex(ds['sha1']))
+            total_bytes += out_file.write(bytes.fromhex(ds['sha256']))
+            
+        out_file.close()
+        
+        return trackset, total_bytes
 
     @classmethod
     def make_hashana_db(cls, rds_list: Iterable[str], output_db: str) -> int:
@@ -592,26 +730,30 @@ class HashanaRDSReader(RDSReader):
         Returns:
             int: number of unique items inserted into database
         """
-        tracking = set()
-        buffr = HBuffer(HashanaData, 32 * 1024)
+        
+        trackset = None
+        inserted = 0
+        
         with HashanaDBWriter(output_db) as hashana_db:
-            hashana_db.create_tables([HashanaData])
-            for rds in rds_list:
-                for ds in HashanaRDSReader(rds).enum_all():
-                    hashid = hash((ds['file_size'],ds['md5'],ds['sha1'],ds['sha256']))
-                    #hashid = hash(ds['sha256'])
-                    if hashid in tracking:
-                        continue
-                    tracking.add(hashid)
-                    buffr.add_bytes(HashanaData.from_keywords(**ds).as_bytes())
-                    if buffr.full:
-                        hashana_db.insert_buffer(buffr, True)
-            if len(buffr) > 0:
-                hashana_db.insert_buffer(buffr, True)
-            inserted = len(tracking)
-            tracking.clear()
-            hashana_db.commit()
-            hashana_db.create_indexes([HashanaData])
+            for i in range(0, len(rds_list)):
+                initialize = False
+                commit = False
+                create_index = False
+                
+                if i == 0:
+                    initialize = True
+                elif i == (len(rds_list) - 1):
+                    create_index = True
+                    commit = True
+                
+                trackset, ix = hashana_db.import_rds(rds_list[i], 
+                                                        adapter=HashanaDataB, 
+                                                        commit=commit, 
+                                                        create_indexes=create_index, 
+                                                        initialize=initialize,
+                                                        trackset=trackset)
+                inserted += ix
+        
         return inserted
 
     @classmethod
@@ -630,16 +772,18 @@ class HashanaRDSReader(RDSReader):
         """
         tracking = set()
         with open(output_csv, 'wt', newline='') as csvfile:
-            csvfile.write(HashanaData.csv_header())
+            csvfile.write(HashanaDataB.csv_header())
             for rds in rds_list:
-                for ds in HashanaRDSReader(rds).enum_all():
-                    hashid = hash((ds['file_size'],ds['md5'],ds['sha1'],ds['sha256']))
+                for ds in HashanaRDSReaderB(rds).enum_all():
+                    itms = (ds['file_size'],ds['md5'],ds['sha1'],ds['sha256'])
+                    hashid = hash(itms)
                     #hashid = hash(ds['sha256'])
                     if hashid in tracking:
                         continue
                     tracking.add(hashid)
-                    csvfile.write(HashanaData.from_keywords(**ds).as_csv_line())
+                    csvfile.write(','.join(itms) + '\n')
         return len(tracking)
+
 
 class HashanaReplier(HashanaDBReader):
     """Basic query handler.
@@ -730,13 +874,14 @@ class HashanaReplier(HashanaDBReader):
                 continue
             
             try:
-                itm = cast(HashanaData, self.item_by_id(rowid, HashanaData))
+                itm = cast(HashanaDataB, self.item_by_id(rowid, HashanaDataB))
             except:
                 # should probably never happen unless something breaks after getting rowid
                 replies[key] = "ERROR_UNKOWN"
             else:
                 replies[key] = itm.as_dict()
         return replies
+
 
 class HashanaTFReplier(HashanaReplier):
     def process_requests(self, requests: Iterable[dict[str,str]]) -> bool:
