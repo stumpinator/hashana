@@ -788,7 +788,7 @@ class HashanaRDSReaderB(RDSReader):
 class HashanaReplier(HashanaDBReader):
     """Basic query handler.
     """
-    _default_reqs: list[HexAdapter] = [MD5, SHA1, SHA256]
+    _default_reqs: list[HexAdapter] = [MD5B, SHA1B, SHA256B]
     _valid_reqs: dict[str,HexAdapter]
     
     def __init__(self, db_path: str, valid_requests: Iterable[HexAdapter] = None):
@@ -920,6 +920,7 @@ class HashanaTFReplier(HashanaReplier):
             replies[key] = rowid is not None
             
         return replies
+
 
 if __name__ == "__main__":
     pass

@@ -1,6 +1,7 @@
 from collections.abc import Iterable, Iterator
 from struct import iter_unpack, unpack, pack
 from itertools import groupby
+from multiprocessing.shared_memory import SharedMemory
 from os import remove
 
 from .adapters import HexAdapter, SQLAdapter, CSVAdapter, ByteAdapter, BLOBAdapterB, ByteOrder
@@ -419,7 +420,7 @@ class FileSizeB(ByteAdapter, SQLAdapter):
     
     default_table_name: str = "hashana"
     
-    """Simple Hex/SQL Adapter for length/size/bytes"""
+    """Simple Adapter for length/size/bytes"""
     def __init__(self, raw: bytes|bytearray, byte_order: str = None):
         super().__init__(raw, byte_order=byte_order)
     
@@ -644,6 +645,144 @@ class BLOBFileB(BLOBAdapterB):
         if item_count == 0:
             return None
         return cls(adapter=adapter, file_path=out_file, byte_order=byte_order)
+
+
+class SHMBufferB(BLOBAdapterB):
+    _shmem: SharedMemory
+    _max: int
+    _index: int
+    _created: bool
+    _idx_struct: str
+    _idx_sz: int
+    _unlinked: bool
+    _closed: bool
+    _size: int
+    _sz_adapter: ByteAdapter
+    
+    def __init__(self,
+                 adapter: ByteAdapter|HexAdapter, 
+                 size: int = 8192, 
+                 name: str|None = None,
+                 create: bool = False,
+                 size_adapter: ByteAdapter = FileSizeB):
+        super().__init__(adapter=adapter)
+        self._sz_adapter = size_adapter
+        self._idx_struct = size_adapter.structure(byte_order=ByteOrder.NET)
+        self._idx_sz = size_adapter.struct_size(byte_order=ByteOrder.NET)
+        min_size = (max(1, size) * self.struct_size()) + self._idx_sz
+        self._shmem = SharedMemory(name=name, create=create, size=min_size)
+        self._max = (((self._shmem.size - self._idx_sz) // self.struct_size()) * self.struct_size()) + self._idx_sz
+        self._index = self._idx_sz
+        self._created = create
+        self._unlinked = False
+        self._closed = False
+        self._size = (self._max - self._idx_sz) // self.struct_size()
+    
+    @property
+    def name(self):
+        return self._shmem.name
+    
+    def save_index(self):
+        sz = self._sz_adapter.from_ints(self._index, byte_order=ByteOrder.NET)
+        self._shmem.buf[0:self._idx_sz] = sz.as_bytes()
+        
+    def load_index(self):
+        sz = self._sz_adapter.from_bytes(self._shmem.buf[0:self._idx_sz])
+        newidx = sz.as_ints(byte_order=ByteOrder.NET)[0]
+        if newidx < 0:
+            raise IndexError("Stored SHMBufferB index out of range")
+        self._index = newidx
+    
+    def add_bytes(self, data) -> int:
+        ret = len(data)
+        end = self._index + ret
+        if end > self._max:
+            return 0
+        self._shmem.buf[self._index:end] = data
+        self._index = end
+        return ret
+    
+    def as_tuples(self) -> Iterator[tuple[int]]:
+        for tpl in iter_unpack(self.adapter.structure(), self._shmem.buf[self._idx_sz:self._index]):
+            yield tpl
+    
+    def clear(self):
+        """resets index. does not clear bytes or change size of buffer
+        """
+        self._index = self._idx_sz
+    
+    def slice_into(self, buffer) -> Iterator[int]:
+        stepping = len(buffer)
+        for i in range(0, self._index, stepping):
+            w = min(stepping, self._index - i)
+            buffer[0:w] = self._shmem.buf[i:i+w]
+            yield w
+    
+    def snapshot(self) -> memoryview:
+        """
+        Returns:
+            memoryview: read only snapshot of memory contents
+        """
+        return self._shmem.buf[self._idx_sz:self._index].toreadonly()
+    
+    def close(self):
+        if not self._closed:
+            self._shmem.close()
+            self._closed = True
+            
+    def unlink(self):
+        if not self._unlinked and self._created:
+            self._shmem.unlink()
+            self._unlinked = True
+        
+    def __del__(self):
+        self.close()
+        self.unlink()
+        if self._shmem is not None:
+            del self._shmem
+
+    @property
+    def full(self) -> bool:
+        """
+        Returns:
+            bool: True if no more bytes can be added to buffer. otherwise False
+        """
+        return self._index >= self._max
+    
+    @property
+    def size(self) -> int:
+        """
+        Returns:
+            int: max items that can be contained (packed) inside buffer
+        """
+        return self._size
+    
+    def __len__(self) -> int:
+        """
+        Returns:
+            int: number of items in buffer. total size of buffer in bytes is (len * adapter.struct_size()) + index
+        """
+        return int((self._index - self._idx_sz) // self.struct_size())
+    
+    def __getitem__(self, key: int) -> ByteAdapter|HexAdapter:
+        """index support
+
+        Args:
+            key (int): index of item to get
+
+        Raises:
+            IndexError: invalid index specified
+
+        Returns:
+            ByteAdapter|HexAdapter: adapted item
+        """
+        if not isinstance(key, int):
+            raise IndexError("Index must be int type")
+        if key > len(self):
+            raise IndexError("Index out of range")
+        stepping = self.struct_size()
+        i = (key * stepping) + self._idx_sz
+        return self.adapter.from_bytes(self._shmem.buf, i)
 
        
 class AdaptedCSV(BasicCSV):
