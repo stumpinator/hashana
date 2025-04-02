@@ -648,6 +648,8 @@ class BLOBFileB(BLOBAdapterB):
 
 
 class SHMBufferB(BLOBAdapterB):
+    """Uses a shared memory buffer for backing
+    """
     _shmem: SharedMemory
     _max: int
     _index: int
@@ -683,10 +685,14 @@ class SHMBufferB(BLOBAdapterB):
         return self._shmem.name
     
     def save_index(self):
+        """writes index to buffer
+        """
         sz = self._sz_adapter.from_ints(self._index, byte_order=ByteOrder.NET)
         self._shmem.buf[0:self._idx_sz] = sz.as_bytes()
         
     def load_index(self):
+        """loads index from buffer
+        """
         sz = self._sz_adapter.from_bytes(self._shmem.buf[0:self._idx_sz])
         newidx = sz.as_ints(byte_order=ByteOrder.NET)[0]
         if newidx < 0:
@@ -726,11 +732,15 @@ class SHMBufferB(BLOBAdapterB):
         return self._shmem.buf[self._idx_sz:self._index].toreadonly()
     
     def close(self):
+        """calls close on the shared memory. required for all when no longer in use.
+        """
         if not self._closed:
             self._shmem.close()
             self._closed = True
             
     def unlink(self):
+        """call unlink on the shared memory. required for creator.
+        """
         if not self._unlinked and self._created:
             self._shmem.unlink()
             self._unlinked = True

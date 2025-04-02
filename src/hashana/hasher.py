@@ -4,10 +4,13 @@ from concurrent import futures
 
 
 class Hasher:
-    """Hashes data using hashlib. Can perform multiple hashing ops simultaneously per file.
+    """Hashes data using hashlib. Can perform multiple hashing ops simultaneously.
     """
     all_hash: dict
     buff_size: int
+    _hasher_map: dict
+    _byte_count: int
+    
     _defaults: dict = None
     
     def __init__(self, **kwargs):
@@ -17,13 +20,40 @@ class Hasher:
         
         classmap = self.hashes()
         self.all_hash = dict()
+        self._hasher_map = dict()
         for k in classmap.keys():
             if cfg[k] == True:
                 self.all_hash[k] = classmap[k]
+                self._hasher_map[k] = classmap[k]()
         self.buff_size = cfg['buff_size']
+        self._byte_count = 0
+        
+    def clear(self):
+        """reset all hashing and byte counter
+        """
+        self._hasher_map.clear()
+        self._byte_count = 0
+        for k,v in self.all_hash.items():
+            self._hasher_map[k] = v()
+    
+    def update(self, buffer: bytes|bytearray|memoryview):
+        """updates all hashing objects
+        """
+        self._byte_count += len(buffer)
+        for v in self._hasher_map.values():
+            v.update(buffer)
+    
+    def report(self) -> dict:
+        """create a dict report of total bytes and hex digests
+        """
+        report = dict(size=self._byte_count)
+        for k,v in self._hasher_map.items():
+            report[k] = v.hexdigest()
+        return report
     
     def hash_file(self, file_path: str) -> dict:
         """Hashes and generates report using configured hash algorithms.
+            call clear() first unless you want to start from a dirty state
 
         Args:
             file_path (str): file to hash
@@ -31,48 +61,17 @@ class Hasher:
         Returns:
             dict: dictionary report of hash information / metadata for file
         """
-        file_hashes = dict()
-        for k,v in self.all_hash.items():
-            file_hashes[k] = v()
         
-        size = 0
         ba = bytearray(self.buff_size)
         mv = memoryview(ba)
         with open(file_path, 'rb', buffering=0) as f:
             while n := f.readinto(mv):
-                size += n
-                for v in file_hashes.values():
-                    v.update(mv[:n])
-                    
-        report = dict(size=size,path=file_path)
-        for k,v in file_hashes.items():
-            report[k] = v.hexdigest()
+                self.update(mv[:n])
+        
+        report = self.report()            
+        report['path'] = file_path
         return report
     
-    def hash_byte_chunks(self, chunks: Iterable) -> dict:
-        """Hashes and generates report using configured hash algorithms.
-
-        Args:
-            chunks (Iterable): bytes to hash
-
-        Returns:
-            dict: dictionary report of hash information / metadata for all bytes combined
-        """
-        file_hashes = dict()
-        for k,v in self.all_hash.items():
-            file_hashes[k] = v()
-            
-        size = 0
-        for data in chunks:
-            size += len(data)
-            for v in file_hashes.values():
-                v.update(data)
-                    
-        report = dict(size=size)
-        for k,v in file_hashes.items():
-            report[k] = v.hexdigest()
-        return report
-        
     def add_hash_type(self, hash_label: str) -> bool:
         """Add hash type to configuration. Must be a hash in .hashes()
 
@@ -85,6 +84,7 @@ class Hasher:
         classmap = self.hashes()
         if hash_label in classmap.keys():
             self.all_hash[hash_label] = classmap[hash_label]
+            self._hasher_map[hash_label] = classmap[hash_label]()
             return True
         else:
             return False
@@ -100,6 +100,7 @@ class Hasher:
         """
         if hash_label in self.all_hash.keys():
             self.all_hash.pop(hash_label)
+            self._hasher_map.pop(hash_label)
             return True
         else:
             return False
@@ -145,6 +146,7 @@ class Hasher:
                     sha224=sha224,
                     sha384=sha384,
                     sha512=sha512)
+
 
 class HasherThreaded(Hasher):
     """Use threads to hash multiple files at a time.
@@ -212,6 +214,7 @@ class HasherThreaded(Hasher):
             report[k] = v.hexdigest()
         report['success'] = True
         return report
+
 
 class HasherMP(HasherThreaded):
     """Use multiprocessing to hash multiple files at a time.

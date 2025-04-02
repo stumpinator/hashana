@@ -218,6 +218,20 @@ class RDSReader:
             for row in con.execute(query):
                 yield row
 
+    def enum_tuples(self, query: str) -> Iterator[tuple]:
+        """enumerates items in database using dictionary factory
+
+        Args:
+            query (str): sql statement for RDS database
+
+        Yields:
+            Iterator[tuple]: all rows returned by query
+        """
+        file_uri = f"{self.path.as_uri()}?mode=ro"
+        with sqlite3.connect(file_uri, uri=True) as con:
+            for row in con.execute(query):
+                yield row
+
     def enum_by_columns(self, columns: Iterable[str] = None, distinct: bool = False) -> Iterator[dict]:
         """get items from RDS database returning only specific column data
 

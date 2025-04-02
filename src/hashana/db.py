@@ -148,7 +148,7 @@ class HashanaDBReader:
     def connected(self) -> bool:
         return self._conn is not None
     
-    def calculate_signature(self, adapter: ByteAdapter|HexAdapter|SQLAdapter, hasher: Hasher) -> dict:
+    def calculate_signature(self, adapter: ByteAdapter|HexAdapter|SQLAdapter, hasher_cfg: dict|None = None) -> dict:
         """hack clone of the dbhash program. determines if *contents* of database have changed.
         it is not reading the database file itself.
         it produces consistent results but it is slow if the database has many rows and/or no index.
@@ -157,6 +157,8 @@ class HashanaDBReader:
         Args:
             adapter (ByteAdapter|HexAdapter|SQLAdapter): class to determine packing and sql statements.
                 must extend both SQLAdapater plus (ByteAdapter OR HexAdapter)
+            hasher_cfg (dict, None): configuration for the hasher.
+                Defaults to None which uses all Hasher defaults
             hasher (Hasher): hasher instance used to hash the bytes and produce report
 
         Raises:
@@ -167,9 +169,9 @@ class HashanaDBReader:
         """
         return self.calculate_signature_hex_sql(structure=adapter.structure(), 
                                                 select_all_sql=adapter.sql_select_all_ordered(), 
-                                                hasher=hasher)
+                                                hasher_cfg=hasher_cfg)
     
-    def calculate_signature_hex_sql(self, structure: str, select_all_sql: str, hasher: Hasher) -> dict:
+    def calculate_signature_hex_sql(self, structure: str, select_all_sql: str, hasher_cfg: dict|None = None) -> dict:
         """hack clone of the dbhash program. determines if *contents* of database have changed.
         it is not reading the database file itself.
         it produces consistent results but it is slow if the database has many rows and/or no index.
@@ -177,7 +179,8 @@ class HashanaDBReader:
         Args:
             structure (str): how to pack data. see ByteAdapter or struct
             select_all_sql (str): sql command to select all items. ORDER BY should be included for consistency
-            hasher (Hasher): hasher instance used to hash the bytes and produce report
+            hasher_cfg (dict, None): configuration for the hasher.
+                Defaults to None which uses all Hasher defaults
 
         Raises:
             NotConnectedError: no connection
@@ -190,8 +193,10 @@ class HashanaDBReader:
         # get all items, ordered, and convert to bytes to hash
         bytestream = map(lambda tpl: pack(structure, *tpl), 
                         self._conn.execute(select_all_sql))
-        d = hasher.hash_byte_chunks(bytestream)
-        return d
+        hasher_cfg = hasher_cfg or dict()
+        hasher = Hasher(**hasher_cfg)
+        set(hasher.update(b) for b in bytestream)
+        return hasher.report()
     
     def has_entry(self, sql_item: SQLAdapter) -> bool:
         """check if entry exists in database. Ignores how many times entry appears.
@@ -430,6 +435,7 @@ class HashanaDBWriter:
     def import_rds(self,
                     rds_file: str,
                     adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
+                    buffer_size: int = 4096,
                     initialize: bool = False,
                     create_indexes: bool = False,
                     commit: bool = False,
@@ -452,7 +458,7 @@ class HashanaDBWriter:
         """
         trackset = trackset or set()
         
-        buffr = HBufferB(adapter, size=1024, byte_order='!')
+        buffr = HBufferB(adapter, size=buffer_size, byte_order='!')
         inserted = 0
         
         if initialize:
@@ -570,8 +576,6 @@ class HashanaDBWriter:
             raise NotConnectedError("Not connected")
         if len(buffer) <= 0:
             return 0
-        #if not issubclass(sql_class, SQLAdapter):
-        #    raise InvalidAdapterError("Adapter must support SQLAdapter interface")
         sql_class = cast(SQLAdapter, sql_class)
         inserted = self._conn.executemany(sql_class.sql_insert(), buffer.as_tuples()).rowcount
         
