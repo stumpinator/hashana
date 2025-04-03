@@ -218,11 +218,12 @@ class RDSReader:
             for row in con.execute(query):
                 yield row
 
-    def enum_tuples(self, query: str) -> Iterator[tuple]:
-        """enumerates items in database using dictionary factory
+    def enum_tuples(self, query: str, uniqueset: set = None) -> Iterator[tuple]:
+        """enumerates items in database
 
         Args:
             query (str): sql statement for RDS database
+            uniqueset (set|None): duplicate tracking. If None (default) do not track duplicates
 
         Yields:
             Iterator[tuple]: all rows returned by query
@@ -230,6 +231,11 @@ class RDSReader:
         file_uri = f"{self.path.as_uri()}?mode=ro"
         with sqlite3.connect(file_uri, uri=True) as con:
             for row in con.execute(query):
+                if uniqueset is not None:
+                    hashid = hash(row)
+                    if hashid in uniqueset:
+                        continue
+                    uniqueset.add(hashid)
                 yield row
 
     def enum_by_columns(self, columns: Iterable[str] = None, distinct: bool = False) -> Iterator[dict]:
