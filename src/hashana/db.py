@@ -391,8 +391,8 @@ class HashanaDBWriter:
                     create_indexes: bool = False,
                     commit: bool = False,
                     byte_order: str = None,
-                    trackset: set = None) -> tuple[set,int]:
-        """Import data from a blobof data
+                    uniqueset: set = None) -> int:
+        """Import data from a blob of data
         
         Args:
             blob_file (str): path to blob file
@@ -402,14 +402,13 @@ class HashanaDBWriter:
             create_indexes (bool): create indexes defined in TableAdapter. This occurs at the end
             commit (bool): perform a commit. this happens after all insertions but before creating indexes
             byte_order (str): byte order of data in blob
-            trackset (set): set of hashes used for tracking duplicates across multiple files.
-                one will be created if this is None.
-                this will be returned (with additions) when import process completes
+            uniqueset (set): set of hashes used for tracking duplicates across multiple files.
+                if none, duplicates will not be tracked. this is faster and uses less memory.
         
         Returns:
-            tuple[set,int] - trackset and total inserted
+            int - number of items inserted
         """
-        trackset = trackset or set()
+        inserted = 0
         
         if initialize:
             self.create_tables([adapter])
@@ -418,10 +417,12 @@ class HashanaDBWriter:
         sqlinsert = adapter.sql_insert()
         
         for i in blobfile.items():
-            hashid = hash(i)
-            if hashid in trackset:
-                continue
-            trackset.add(hashid)
+            if uniqueset is not None:
+                hashid = hash(i)
+                if hashid in uniqueset:
+                    continue
+                uniqueset.add(hashid)
+            inserted += 1
             self._conn.execute(sqlinsert, i.as_sql_values())
         
         if commit:
@@ -430,7 +431,7 @@ class HashanaDBWriter:
         if create_indexes:
             self.create_indexes([adapter])
         
-        return trackset, len(trackset)
+        return inserted
     
     def import_rds(self,
                     rds_file: str,
@@ -439,7 +440,7 @@ class HashanaDBWriter:
                     initialize: bool = False,
                     create_indexes: bool = False,
                     commit: bool = False,
-                    trackset: set = None) -> tuple[set,int]:
+                    uniqueset: set = None) -> int:
         """Import data from a NSRL RDS data set.
         
         Args:
@@ -449,33 +450,30 @@ class HashanaDBWriter:
             initialize (bool): create tables defined in adapter. this happens before any other db ops
             create_indexes (bool): create indexes defined in TableAdapter. This occurs at the end
             commit (bool): perform a commit. this happens after all insertions but before creating indexes
-            trackset (set): set of hashes used for tracking duplicates across multiple files.
-                one will be created if this is None.
-                this will be returned (with additions) when import process completes
+            uniqueset (set): set of hashes used for tracking duplicates across multiple files.
+                if none, duplicates will not be tracked. this is faster and uses less memory.
         
         Returns:
-            tuple[set,int] - trackset and total inserted
+            int - number of items inserted
         """
-        trackset = trackset or set()
         
         buffr = HBufferB(adapter, size=buffer_size, byte_order='!')
         inserted = 0
         
         if initialize:
             self.create_tables([adapter])
-            
-        rds = HashanaRDSReaderB(rds_file)
         
-        for ds in rds.enum_all():
-            hashid = hash((ds['file_size'],ds['md5'],ds['sha1'],ds['sha256']))
-            #hashid = hash(ds['sha256'])
-            if hashid in trackset:
-                continue
-            trackset.add(hashid)
-            buffr.add_bytes(pack(FileSizeB.structure('!'), int((ds['file_size']))))
-            buffr.add_bytes(bytes.fromhex(ds['md5']))
-            buffr.add_bytes(bytes.fromhex(ds['sha1']))
-            buffr.add_bytes(bytes.fromhex(ds['sha256']))
+        if uniqueset is None:
+            qry = "SELECT file_size,md5,sha1,sha256 FROM FILE;"
+        else:
+            # the RDS set hashes should all be in uppercase, but ensure for consistency
+            qry = "SELECT file_size,upper(md5),upper(sha1),upper(sha256) FROM FILE;"
+        
+        for ds in RDSReader(rds_file).enum_tuples(query=qry, uniqueset=uniqueset):
+            buffr.add_bytes(pack(FileSizeB.structure('!'), int((ds[0]))))
+            buffr.add_bytes(bytes.fromhex(ds[1]))
+            buffr.add_bytes(bytes.fromhex(ds[2]))
+            buffr.add_bytes(bytes.fromhex(ds[3]))
             if buffr.full:
                 inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
         inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
@@ -486,7 +484,7 @@ class HashanaDBWriter:
         if create_indexes:
             self.create_indexes([adapter])
         
-        return trackset, inserted
+        return inserted
         
     def close(self, commit: bool = False):
         if self._conn is not None:
@@ -687,10 +685,9 @@ class HashanaRDSReaderB(RDSReader):
             hb.add_bytes(mv)
             yield hb
 
-    def save_blob(self, output_file: str, append: bool = True, trackset: set | None = None) -> tuple[set,int]:
+    def save_blob(self, output_file: str, append: bool = True, uniqueset: set | None = None) -> int:
         """Saves RDS items into a binary blob file
         """        
-        trackset = trackset or set()
         total_bytes = 0
         op = Path(output_file)
         if op.exists() and op.is_dir():
@@ -700,25 +697,22 @@ class HashanaRDSReaderB(RDSReader):
             out_file = open(op.absolute(), 'ba')
         else:
             out_file = open(op.absolute(), 'wb')
-            
-        for ds in self.enum_all():
-            hashid = hash((ds['file_size'],
-                       ds['md5'].lower(),
-                       ds['sha1'].lower(),
-                       ds['sha256'].lower()))
-            if hashid in trackset:
-                continue
-            
-            trackset.add(hashid)
-            
-            total_bytes += out_file.write(pack(FileSizeB.structure('!'), int((ds['file_size']))))
-            total_bytes += out_file.write(bytes.fromhex(ds['md5']))
-            total_bytes += out_file.write(bytes.fromhex(ds['sha1']))
-            total_bytes += out_file.write(bytes.fromhex(ds['sha256']))
-            
+        
+        if uniqueset is None:
+            qry = "SELECT file_size,md5,sha1,sha256 FROM FILE;"
+        else:
+            # the RDS set hashes should all be in uppercase, but ensure for consistency
+            qry = "SELECT file_size,upper(md5),upper(sha1),upper(sha256) FROM FILE;"
+        
+        for ds in self.enum_tuples(query=qry, uniqueset=uniqueset):
+            total_bytes += out_file.write(pack(FileSizeB.structure('!'), int((ds[0]))))
+            total_bytes += out_file.write(bytes.fromhex(ds[1]))
+            total_bytes += out_file.write(bytes.fromhex(ds[2]))
+            total_bytes += out_file.write(bytes.fromhex(ds[3]))
+        
         out_file.close()
         
-        return trackset, total_bytes
+        return total_bytes
 
     @classmethod
     def make_hashana_db(cls, rds_list: Iterable[str], output_db: str) -> int:
@@ -735,7 +729,7 @@ class HashanaRDSReaderB(RDSReader):
             int: number of unique items inserted into database
         """
         
-        trackset = None
+        trackset = set()
         inserted = 0
         
         with HashanaDBWriter(output_db) as hashana_db:
@@ -750,13 +744,12 @@ class HashanaRDSReaderB(RDSReader):
                     create_index = True
                     commit = True
                 
-                trackset, ix = hashana_db.import_rds(rds_list[i], 
-                                                        adapter=HashanaDataB, 
-                                                        commit=commit, 
-                                                        create_indexes=create_index, 
-                                                        initialize=initialize,
-                                                        trackset=trackset)
-                inserted += ix
+                inserted += hashana_db.import_rds(rds_list[i], 
+                                                    adapter=HashanaDataB, 
+                                                    commit=commit, 
+                                                    create_indexes=create_index, 
+                                                    initialize=initialize,
+                                                    uniqueset=trackset)
         
         return inserted
 
