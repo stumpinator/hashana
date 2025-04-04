@@ -9,6 +9,3 @@ class InvalidIPAddressError(Exception):
 
 class InvalidAdapterError(Exception):
     pass
-
-class MissingKeywordError(Exception):
-    pass

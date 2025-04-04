@@ -1,39 +1,148 @@
 from collections.abc import Iterable, Iterator
-from struct import iter_unpack
+from struct import iter_unpack, unpack, pack
+from itertools import groupby
+from multiprocessing.shared_memory import SharedMemory
 from os import remove
 
-from .adapters import HexAdapter, SQLAdapter, BLOBAdapter, CSVAdapter
-from .wrapped import BasicCSV
-from .exceptions import InvalidHexError, InvalidIPAddressError, InvalidAdapterError
+from .adapters import HexAdapter, SQLAdapter, ByteAdapter, BLOBAdapterB, ByteOrder
+from .exceptions import InvalidIPAddressError
 
 
-class IP6(HexAdapter, SQLAdapter):
-    """IPv6 Hex Adapter
+class IP4B(ByteAdapter, SQLAdapter):
+    """IPv4 Adapter
     """
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid Address")
-        super().__init__(hexed)
-    
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "qq"
 
-    @classmethod
-    def label(cls) -> str:
-        return "ipv6"
+    default_label: str = "ipv4"
+    default_struct_layout: str = "I"
+    default_packed_count: int = 1
+    
+    default_table_name: str = "hashana"
+    
+    address_str: str
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
+        self.address_str = None
     
     def as_sql_values(self) -> tuple:
         return self.as_ints()
     
+    @property
+    def address(self):
+        if self.address_str is None:
+           self.address_str = self.as_address()
+        return self.address_str
+    
+    def as_address(self) -> str:
+        return '.'.join(str(z) for z in unpack("BBBB", self._bytes))
+    
+    def as_bits(self) -> str:
+        x = unpack('>I', self._bytes)[0]
+        x = f"{x:b}"
+        zlen = 32 - len(x)
+        return f"{'0' * zlen}{x}"
+    
     @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
+    def from_address(cls, address_str: str, byte_order: str = None):
+        octs = address_str.split('.')
+        if len(octs) != 4:
+            raise InvalidIPAddressError(f"{address_str} is not a valid IPV4 address")
+        z = pack("BBBB", *[int(x) for x in octs])
+        c = cls(z, byte_order=byte_order)
+        c.address_str = address_str
+        return c
+    
+    @classmethod
+    def sql_columns(cls) -> dict[str,str]:
+        return dict(ipv4=SQLAdapter.INT_DEFAULT)
+    
+    @classmethod
+    def from_sql_values(cls, *args):
+        return cls.from_ints(*args)
+
+
+class IP6B(ByteAdapter, SQLAdapter):
+    """IPv6 Adapter
+    """
+    default_label: str = "ipv6"
+    default_struct_layout: str = "qq"
+    default_packed_count: int = 2
+    
+    default_table_name: str = "hashana"
+    
+    address_str: str
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
+        self.address_str = None
+    
+    def as_sql_values(self) -> tuple:
+        return self.as_ints()
+    
+    @property
+    def address(self):
+        if self.address_str is None:
+           self.address_str = self.as_address()
+        return self.address_str
+    
+    def as_address(self, squash: bool = False):
+        if self.byte_order not in ByteOrder:
+            return None
+        il = unpack(f"{self.byte_order}8H", self._bytes)
+        addr = ["{:x}".format(i) for i in il]
+        if squash:
+            addr = self.flatten_address(addr)
+        else:
+            addr = ':'.join(addr)
+        return addr
     
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
         return dict(ipv6_0=SQLAdapter.INT_DEFAULT,
                     ipv6_1=SQLAdapter.INT_DEFAULT)
+    
+    @staticmethod
+    def flatten_address(hex_pieces: list[str]) -> str:
+        sqshd = list()
+        longest = 1
+        for k,g in groupby(hex_pieces, key=lambda x: x=='0'):
+            if k:
+                zl = list(g)
+                sqshd.append(zl)
+                if len(zl) > longest:
+                    longest = len(zl)
+            else:
+                sqshd.extend(list(g))
+        
+        if longest == 8:
+            return "::0"
+        
+        i = 0
+        mx = len(sqshd)
+        while i < mx:
+            if isinstance(sqshd[i], list):
+                g = sqshd.pop(i)
+                mx -= 1
+                if len(g) == 1:
+                    sqshd.insert(i, g[0])
+                    i += 1
+                    mx += 1
+                elif len(g) == longest:
+                    sqshd.insert(i, '')
+                    longest = 0
+                    i += 1
+                    mx += 1
+                else:
+                    for h in g:
+                        sqshd.insert(i, h)
+                        i += 1
+                        mx += 1
+            i += 1
+        if sqshd[0] == '':
+            sqshd.insert(0, '')
+        elif sqshd[-1] == '':
+            sqshd.append('')
+        return ':'.join(sqshd)
     
     @classmethod
     def from_sql_values(cls, *args):
@@ -54,20 +163,22 @@ class IP6(HexAdapter, SQLAdapter):
         """
         if ":::" in address:
             raise InvalidIPAddressError("Invalid address: too many colons")
+        
         split1 = address.strip().split('::')
         if len(split1) > 2:
             raise InvalidIPAddressError("Invalid address: multiple instances of ::")
-        elif len(split1) == 1:
-            h = split1[0].split(':')
+        
+        h = split1[0].split(':')
+        if len(split1) == 1:
             if len(h) != 8:
                 raise InvalidIPAddressError("Invalid address: not wide enough")
         else:
-            h = split1[0].split(':')
             h2 = split1[1].split(':')
             total = len(h) + len(h2)
             if total > 8:
-                raise InvalidIPAddressError("Invalid address: too wide")
-            h.extend('' for x in range(0, (8 - total)))
+                raise InvalidIPAddressError("Invalid address: too wide. Was the port included?")
+            elif total < 8:
+                h.extend('' for x in range(0, (8 - total)))
             h.extend(h2)
         return h
     
@@ -78,31 +189,27 @@ class IP6(HexAdapter, SQLAdapter):
         Args:
             address (str): ipv6 address in text/string format
         """
-        h = IP6.split_address(address)
-        return cls(f"{h[0]:0>4}{h[1]:0>4}{h[2]:0>4}{h[3]:0>4}{h[4]:0>4}{h[5]:0>4}{h[6]:0>4}{h[7]:0>4}")
+        h = cls.split_address(address)
+        ip6 = cls.from_hex(f"{h[0]:0>4}{h[1]:0>4}{h[2]:0>4}{h[3]:0>4}{h[4]:0>4}{h[5]:0>4}{h[6]:0>4}{h[7]:0>4}")
+        ip6.address_str = address
+        return ip6
 
-class MAC(HexAdapter, SQLAdapter):
+
+class MACB(ByteAdapter, SQLAdapter):
     """MAC address hex adapter
     """
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid Address")
-        super().__init__(hexed.replace(':',''))
     
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "hhh"
+    default_label: str = "macaddr"
+    default_struct_layout: str = "hhh"
+    default_packed_count: int = 3
     
-    @classmethod
-    def label(cls) -> str:
-        return "macaddr"
-
+    default_table_name: str = "hashana"
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
+    
     def as_sql_values(self) -> tuple:
         return self.as_ints()
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
     
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
@@ -114,28 +221,21 @@ class MAC(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
-class CRC32(HexAdapter, SQLAdapter):
+
+class CRC32B(ByteAdapter, SQLAdapter):
     """CRC32 Hex Adapter
     """
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
+    default_label: str = "crc32"
+    default_struct_layout: str = "i"
+    default_packed_count: int = 1
     
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "i"
+    default_table_name: str = "hashana"
     
-    @classmethod
-    def label(cls) -> str:
-        return "crc32"
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
     
     def as_sql_values(self) -> tuple:
         return self.as_ints()
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
     
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
@@ -145,28 +245,21 @@ class CRC32(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
-class MD5(HexAdapter, SQLAdapter):
+
+class MD5B(ByteAdapter, SQLAdapter):
     """MD5 Hex/SQL Adapter"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
     
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "iiii"
+    default_label: str = "md5"
+    default_struct_layout: str = "iiii"
+    default_packed_count: int = 4
     
-    @classmethod
-    def label(cls) -> str:
-        return "md5"
+    default_table_name: str = "hashana"
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
     
     def as_sql_values(self) -> tuple:
         return self.as_ints()
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
     
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
@@ -178,29 +271,21 @@ class MD5(HexAdapter, SQLAdapter):
     @classmethod
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
+
+
+class SHA1B(ByteAdapter, SQLAdapter):
+    default_label: str = "sha1"
+    default_struct_layout: str = "iiiii"
+    default_packed_count: int = 5
     
-class SHA1(HexAdapter, SQLAdapter):
+    default_table_name: str = "hashana"
+    
     """SHA1 Hex/SQL Adapter"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
-    
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "iiiii"
-    
-    @classmethod
-    def label(cls) -> str:
-        return "sha1"
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
     
     def as_sql_values(self) -> tuple:
         return self.as_ints()
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
     
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
@@ -213,27 +298,19 @@ class SHA1(HexAdapter, SQLAdapter):
     @classmethod
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
+    
 
-class SHA224(HexAdapter, SQLAdapter):
+class SHA224B(ByteAdapter, SQLAdapter):
     """SHA224 Hex/SQL Adapter"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
+    default_label: str = "sha224"
+    default_struct_layout: str = "qqqi"
+    default_packed_count: int = 4
     
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "qqqi"
+    default_table_name: str = "hashana"
     
-    @classmethod
-    def label(cls) -> str:
-        return "sha224"
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
     
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
-
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
         return dict(sha224_0=SQLAdapter.INT_DEFAULT,
@@ -248,26 +325,19 @@ class SHA224(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
-class SHA256(HexAdapter, SQLAdapter):
-    """SHA256 Hex/SQL Adapter"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
-    
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "qqqq"
-    
-    @classmethod
-    def label(cls) -> str:
-        return "sha256"
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
 
+class SHA256B(ByteAdapter, SQLAdapter):
+    """SHA256 Hex/SQL Adapter"""
+    
+    default_label: str = "sha256"
+    default_struct_layout: str = "qqqq"
+    default_packed_count: int = 4
+    
+    default_table_name: str = "hashana"
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
+    
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
         return dict(sha256_0=SQLAdapter.INT_DEFAULT,
@@ -282,26 +352,18 @@ class SHA256(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
-class SHA384(HexAdapter, SQLAdapter):
-    """SHA384 Hex/SQL Adapter"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
-    
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "qqqqqq"
-    
-    @classmethod
-    def label(cls) -> str:
-        return "sha384"
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
 
+class SHA384B(ByteAdapter, SQLAdapter):
+    """SHA384 Hex/SQL Adapter"""
+    default_label: str = "sha384"
+    default_struct_layout: str = "qqqqqq"
+    default_packed_count: int = 6
+    
+    default_table_name: str = "hashana"
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
+    
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
         return dict(sha384_0=SQLAdapter.INT_DEFAULT,
@@ -318,26 +380,19 @@ class SHA384(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
-class SHA512(HexAdapter, SQLAdapter):
-    """SHA512 Hex/SQL Adapter"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid digest")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
-    
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "qqqqqqqq"
-    
-    @classmethod
-    def label(cls) -> str:
-        return "sha512"
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
 
+class SHA512B(ByteAdapter, SQLAdapter):
+    """SHA512 Hex/SQL Adapter"""
+    
+    default_label: str = "sha512"
+    default_struct_layout: str = "qqqqqqqq"
+    default_packed_count: int = 4
+    
+    default_table_name: str = "hashana"
+    
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
+    
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
         return dict(sha512_0=SQLAdapter.INT_DEFAULT,
@@ -356,28 +411,20 @@ class SHA512(HexAdapter, SQLAdapter):
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
 
-class FileSize(HexAdapter, SQLAdapter):
-    """Simple Hex/SQL Adapter for length/size/bytes"""
-    def __init__(self, hexed: str):
-        if hexed is None:
-            raise InvalidHexError("Invalid size")
-        super().__init__(hexed)
-        super(HexAdapter, self).__init__()
+
+class FileSizeB(ByteAdapter, SQLAdapter):
+    default_label: str = "file_size"
+    default_struct_layout: str = "q"
+    default_packed_count: int = 1
     
-    @classmethod
-    def struct_layout(cls) -> str:
-        return "q"
+    default_table_name: str = "hashana"
     
-    @classmethod
-    def label(cls) -> str:
-        return "file_size"
+    """Simple Adapter for length/size/bytes"""
+    def __init__(self, raw: bytes|bytearray, byte_order: str = None):
+        super().__init__(raw, byte_order=byte_order)
     
     def as_sql_values(self) -> tuple:
         return self.as_ints()
-    
-    @classmethod
-    def sql_table_name(cls) -> str:
-        return "hashana"
     
     @classmethod
     def sql_columns(cls) -> dict[str,str]:
@@ -386,9 +433,10 @@ class FileSize(HexAdapter, SQLAdapter):
     @classmethod
     def from_sql_values(cls, *args):
         return cls.from_ints(*args)
-
-class HBuffer(BLOBAdapter):
-    """Buffer to store multiple HexAdapter items in efficient binary format.
+    
+    
+class HBufferB(BLOBAdapterB):
+    """Buffer to store multiple items in efficient binary format.
 
     Raises:
         IndexError: invalid index specified
@@ -397,16 +445,25 @@ class HBuffer(BLOBAdapter):
     _buffer: bytearray
     _memview: memoryview
     _index: int
+    _full_threshold = int
     
-    def __init__(self, hex_adapter: HexAdapter, size: int = 4096):
+    def __init__(self,
+                 adapter: ByteAdapter|HexAdapter, 
+                 byte_order: str = None,
+                 structure: str = None, 
+                 struct_size: int = None, 
+                 size: int = 4096):
         """
         Args:
-            hex_adapter (HexAdapter): adapter for underlying storage. determines how data is packed/unpacked
+            adapter (ByteAdapter): adapter for underlying storage. determines how data is packed/unpacked
             size (int, optional): Max number of items that can be stored in buffer. Defaults to 4096.
+            byte_order (str, optional): byte order. same as struct. see ByteOrder enum from adapters.
+                defaults to adapter default
         """
-        super().__init__(hex_adapter)
+        super().__init__(adapter, byte_order=byte_order, structure=structure, struct_size=struct_size)
         self._index = 0
         self._buffer = bytearray(max(1, size) * self.struct_size())
+        self._full_threshold = len(self._buffer) - self.struct_size()
         self._memview = memoryview(self._buffer)
     
     def slice_into(self, buffer) -> Iterator[int]:
@@ -419,6 +476,8 @@ class HBuffer(BLOBAdapter):
     def add_bytes(self, data: bytes) -> int:
         ret = len(data)
         end = self._index + ret
+        if end > len(self._buffer):
+            return 0
         self._memview[self._index:end] = data
         self._index = end
         return ret
@@ -431,7 +490,7 @@ class HBuffer(BLOBAdapter):
         return self._memview[0:self._index].toreadonly()
     
     def as_tuples(self) -> Iterator[tuple[int]]:
-        for tpl in iter_unpack(self._hex_adapter.structure(), self._memview[0:self._index]):
+        for tpl in iter_unpack(self.structure(), self._memview[0:self._index]):
             yield tpl
     
     def clear(self):
@@ -445,14 +504,8 @@ class HBuffer(BLOBAdapter):
         Returns:
             bool: True if no more items can be added to buffer. otherwise False
         """
-        return (len(self._buffer) - self._index) >= self.struct_size()
+        return self._index > self._full_threshold
 
-    @property
-    def hex_adapter(self) -> HexAdapter:
-        """Hex Adapter for individual items in buffer
-        """
-        return self._hex_adapter
-    
     @property
     def size(self) -> int:
         """
@@ -464,11 +517,11 @@ class HBuffer(BLOBAdapter):
     def __len__(self) -> int:
         """
         Returns:
-            int: number of items in buffer. total size of buffer in bytes is len * hex_adapter.struct_size()
+            int: number of items in buffer. total size of buffer in bytes is len * adapter.struct_size()
         """
         return int(self._index / self.struct_size())
     
-    def __getitem__(self, key: int) -> HexAdapter:
+    def __getitem__(self, key: int) -> ByteAdapter:
         """index support
 
         Args:
@@ -478,7 +531,7 @@ class HBuffer(BLOBAdapter):
             IndexError: invalid index specified
 
         Returns:
-            HexAdapter: hex item
+            ByteAdapter: item
         """
         if not isinstance(key, int):
             raise IndexError("Index must be int type")
@@ -486,21 +539,28 @@ class HBuffer(BLOBAdapter):
             raise IndexError("Index out of range")
         stepping = self.struct_size()
         i = key * stepping
-        return self._hex_adapter(self._memview[i:i+stepping].hex())
+        return self._adapter.from_bytes(self._memview, i, self._byte_order)
+        #return self._adapter(self._memview[i:i+stepping], byte_order=self._byte_order)
 
-class BLOBFile(BLOBAdapter):
-    """store and read hex items in a binary file. space efficient but slow to read with many objects due to no index
+
+class BLOBFileB(BLOBAdapterB):
+    """store and read items in a binary file. space efficient but slow to read with many objects due to no index
     """
     _file: str
     
-    def __init__(self, hex_adapter: HexAdapter, file_path: str):
+    def __init__(self,
+                 adapter: ByteAdapter | HexAdapter,
+                 file_path: str,
+                 byte_order:str = None, 
+                 structure: str = None, 
+                 struct_size: int = None):
         """
         Args:
-            hex_adapter (HexAdapter): adapter for underlying storage. determines how data is packed/unpacked
+            adapter (ByteAdapter): adapter for underlying storage. determines how data is packed/unpacked
             file_path (str): path to file where binary data will be stored/read
         """
         self._file = file_path
-        super().__init__(hex_adapter)
+        super().__init__(adapter=adapter, byte_order=byte_order, structure=structure, struct_size=struct_size)
     
     def add_many(self, blobs: Iterable[bytes]) -> int:
         """add multiple items to file
@@ -543,7 +603,7 @@ class BLOBFile(BLOBAdapter):
         ba = bytearray(stepping * 1024)
         mv = memoryview(ba)
         for sz in self.slice_into(mv):
-            for tpl in iter_unpack(self._hex_adapter.structure(), mv[0:sz]):
+            for tpl in iter_unpack(self.structure(), mv[0:sz]):
                 yield tpl
     
     def add_bytes(self, data: bytes) -> int:
@@ -562,42 +622,177 @@ class BLOBFile(BLOBAdapter):
         """deletes the file
         """
         remove(self._file)
-                        
-class AdaptedCSV(BasicCSV):
-    """Read/writes CSV file. Requires items to implement CSVAdapter
-    """
-    _csv_adapter = None
-    
-    def __init__(self, path: str, csv_adapter: CSVAdapter):
-        """
-        Args:
-            path (str): path to CSV file where data will be read/write
-            csv_adapter (CSVAdapter): adapter class to convert to/from csv lines
-        """
-        if not issubclass(csv_adapter, CSVAdapter):
-            raise InvalidAdapterError("Adapter must support CSVAdapter interface")
-        super().__init__(path)
-        self._csv_adapter = csv_adapter
         
-    def insert_adapted(self, data: Iterator[CSVAdapter]):
-        """insert items into CSV. clobbers existing items.
+    @classmethod
+    def combine(cls, adapter: ByteAdapter|HexAdapter, blob_files: list, out_file: str, byte_order: str|None=None):
+        trackset = set()
+
+        output = open(out_file, 'wb')
+        
+        for ofl in blob_files:
+            hbb = cls(adapter=adapter, file_path=ofl, byte_order=byte_order)
+            for i in hbb.items():
+                hashid = hash(i)
+                if hashid in trackset:
+                    continue
+                trackset.add(hashid)
+                output.write(i.as_bytes())
+        
+        output.close()
+        item_count = len(trackset)
+        trackset.clear()
+        if item_count == 0:
+            return None
+        return cls(adapter=adapter, file_path=out_file, byte_order=byte_order)
+
+
+class SHMBufferB(BLOBAdapterB):
+    """Uses a shared memory buffer for backing
+    """
+    _shmem: SharedMemory
+    _max: int
+    _index: int
+    _created: bool
+    _idx_struct: str
+    _idx_sz: int
+    _unlinked: bool
+    _closed: bool
+    _size: int
+    _sz_adapter: ByteAdapter
+    
+    def __init__(self,
+                 adapter: ByteAdapter|HexAdapter, 
+                 size: int = 8192, 
+                 name: str|None = None,
+                 create: bool = False,
+                 size_adapter: ByteAdapter = FileSizeB):
+        super().__init__(adapter=adapter)
+        self._sz_adapter = size_adapter
+        self._idx_struct = size_adapter.structure(byte_order=ByteOrder.NET)
+        self._idx_sz = size_adapter.struct_size(byte_order=ByteOrder.NET)
+        min_size = (max(1, size) * self.struct_size()) + self._idx_sz
+        self._shmem = SharedMemory(name=name, create=create, size=min_size)
+        self._max = (((self._shmem.size - self._idx_sz) // self.struct_size()) * self.struct_size()) + self._idx_sz
+        self._index = self._idx_sz
+        self._created = create
+        self._unlinked = False
+        self._closed = False
+        self._size = (self._max - self._idx_sz) // self.struct_size()
+    
+    @property
+    def name(self):
+        return self._shmem.name
+    
+    def save_index(self):
+        """writes index to buffer
+        """
+        sz = self._sz_adapter.from_ints(self._index, byte_order=ByteOrder.NET)
+        self._shmem.buf[0:self._idx_sz] = sz.as_bytes()
+        
+    def load_index(self):
+        """loads index from buffer
+        """
+        sz = self._sz_adapter.from_bytes(self._shmem.buf[0:self._idx_sz])
+        newidx = sz.as_ints(byte_order=ByteOrder.NET)[0]
+        if newidx < 0:
+            raise IndexError("Stored SHMBufferB index out of range")
+        self._index = newidx
+    
+    def add_bytes(self, data) -> int:
+        ret = len(data)
+        end = self._index + ret
+        if end > self._max:
+            return 0
+        self._shmem.buf[self._index:end] = data
+        self._index = end
+        return ret
+    
+    def as_tuples(self) -> Iterator[tuple[int]]:
+        for tpl in iter_unpack(self.adapter.structure(), self._shmem.buf[self._idx_sz:self._index]):
+            yield tpl
+    
+    def clear(self):
+        """resets index. does not clear bytes or change size of buffer
+        """
+        self._index = self._idx_sz
+    
+    def slice_into(self, buffer) -> Iterator[int]:
+        stepping = len(buffer)
+        for i in range(0, self._index, stepping):
+            w = min(stepping, self._index - i)
+            buffer[0:w] = self._shmem.buf[i:i+w]
+            yield w
+    
+    def snapshot(self) -> memoryview:
+        """
+        Returns:
+            memoryview: read only snapshot of memory contents
+        """
+        return self._shmem.buf[self._idx_sz:self._index].toreadonly()
+    
+    def close(self):
+        """calls close on the shared memory. required for all when no longer in use.
+        """
+        if not self._closed:
+            self._shmem.close()
+            self._closed = True
+            
+    def unlink(self):
+        """call unlink on the shared memory. required for creator.
+        """
+        if not self._unlinked and self._created:
+            self._shmem.unlink()
+            self._unlinked = True
+        
+    def __del__(self):
+        self.close()
+        self.unlink()
+        if self._shmem is not None:
+            del self._shmem
+
+    @property
+    def full(self) -> bool:
+        """
+        Returns:
+            bool: True if no more bytes can be added to buffer. otherwise False
+        """
+        return self._index >= self._max
+    
+    @property
+    def size(self) -> int:
+        """
+        Returns:
+            int: max items that can be contained (packed) inside buffer
+        """
+        return self._size
+    
+    def __len__(self) -> int:
+        """
+        Returns:
+            int: number of items in buffer. total size of buffer in bytes is (len * adapter.struct_size()) + index
+        """
+        return int((self._index - self._idx_sz) // self.struct_size())
+    
+    def __getitem__(self, key: int) -> ByteAdapter|HexAdapter:
+        """index support
 
         Args:
-            data (Iterator[CSVAdapter]): items to insert. must support CSVAdapter interface
-        """
-        with open(self.path, 'wt') as f:
-            f.write(self._csv_adapter.csv_header())
-            for d in data:
-                f.write(d.as_csv_line())
-            
-    def enum_adapted(self) -> Iterator[CSVAdapter]:
-        """enumerates items in the csv file
+            key (int): index of item to get
 
-        Yields:
-            Iterator[CSVAdapter]: items converted using CSVAdapter
+        Raises:
+            IndexError: invalid index specified
+
+        Returns:
+            ByteAdapter|HexAdapter: adapted item
         """
-        for line in self.enum_lines():
-            yield self._csv_adapter.from_csv_line(line)
+        if not isinstance(key, int):
+            raise IndexError("Index must be int type")
+        if key > len(self):
+            raise IndexError("Index out of range")
+        stepping = self.struct_size()
+        i = (key * stepping) + self._idx_sz
+        return self.adapter.from_bytes(self._shmem.buf, i)
+
 
 if __name__ == "__main__":
     pass

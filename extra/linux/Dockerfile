@@ -1,6 +1,6 @@
 # Use an official Python runtime as a parent image
 FROM python:3.12-slim-bookworm
-ARG HASHANA_WHEEL=hashana-0.4.0-py3-none-any.whl
+ARG HASHANA_WHEEL=hashana-0.5.0-py3-none-any.whl
 
 # Set the working directory in the container
 WORKDIR /hashana
