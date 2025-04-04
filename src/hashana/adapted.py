@@ -4,8 +4,7 @@ from itertools import groupby
 from multiprocessing.shared_memory import SharedMemory
 from os import remove
 
-from .adapters import HexAdapter, SQLAdapter, CSVAdapter, ByteAdapter, BLOBAdapterB, ByteOrder
-from .wrapped import BasicCSV
+from .adapters import HexAdapter, SQLAdapter, ByteAdapter, BLOBAdapterB, ByteOrder
 from .exceptions import InvalidHexError, InvalidIPAddressError, InvalidAdapterError
 
 
@@ -793,43 +792,6 @@ class SHMBufferB(BLOBAdapterB):
         stepping = self.struct_size()
         i = (key * stepping) + self._idx_sz
         return self.adapter.from_bytes(self._shmem.buf, i)
-
-       
-class AdaptedCSV(BasicCSV):
-    """Read/writes CSV file. Requires items to implement CSVAdapter
-    """
-    _csv_adapter = None
-    
-    def __init__(self, path: str, csv_adapter: CSVAdapter):
-        """
-        Args:
-            path (str): path to CSV file where data will be read/write
-            csv_adapter (CSVAdapter): adapter class to convert to/from csv lines
-        """
-        if not issubclass(csv_adapter, CSVAdapter):
-            raise InvalidAdapterError("Adapter must support CSVAdapter interface")
-        super().__init__(path)
-        self._csv_adapter = csv_adapter
-        
-    def insert_adapted(self, data: Iterator[CSVAdapter]):
-        """insert items into CSV. clobbers existing items.
-
-        Args:
-            data (Iterator[CSVAdapter]): items to insert. must support CSVAdapter interface
-        """
-        with open(self.path, 'wt') as f:
-            f.write(self._csv_adapter.csv_header())
-            for d in data:
-                f.write(d.as_csv_line())
-            
-    def enum_adapted(self) -> Iterator[CSVAdapter]:
-        """enumerates items in the csv file
-
-        Yields:
-            Iterator[CSVAdapter]: items converted using CSVAdapter
-        """
-        for line in self.enum_lines():
-            yield self._csv_adapter.from_csv_line(line)
 
 
 if __name__ == "__main__":

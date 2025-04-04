@@ -1,12 +1,11 @@
 import sqlite3
 from collections.abc import Iterable, Iterator
-from typing import cast
+from typing import cast, List
 from struct import pack
 from pathlib import Path
 
 from .adapters import SQLAdapter, TableAdapter, HexAdapter, GroupAdapterB, ByteAdapter, ByteOrder
 from .adapted import FileSizeB, MD5B, SHA1B, SHA256B, HBufferB, BLOBFileB
-from .wrapped import RDSReader
 from .hasher import Hasher
 from .exceptions import InvalidHexError, NotConnectedError, InvalidAdapterError
 
@@ -318,6 +317,172 @@ class HashanaDBReader:
             return sql_class.from_sql_values(*row)
         else:
             return None
+
+
+class RDSReader:
+    """Read and enumerate files in the NSRL Reference Data Set (RDS)"""
+    
+    path: Path
+    sql_file_count: str = r"""SELECT COUNT(*) FROM FILE;"""
+    sql_hash_count: str = r"""SELECT COUNT(*) FROM (SELECT md5 FROM FILE WHERE file_size > 0 GROUP BY md5);"""
+    
+    _custom_columns: frozenset = frozenset(('md5','sha1','sha256','file_size'))
+    
+    @staticmethod
+    def dict_factory(cursor, row) -> dict:
+        """row factory used with sqlite3 to return dictionaries
+        
+        Returns:
+            dict: dictionary with key/value cooresponding to column/row
+        """
+        fields = [column[0] for column in cursor.description]
+        return {key: value for key, value in zip(fields, row)}
+    
+    def __init__(self, path):
+        """
+        Args:
+            path (str): path to NSRL RDS sqlite database
+        """
+        self.path = Path(path)
+
+    def file_count(self) -> int:
+        """number of entries in the FILE view.
+           fast but not very useful since it gets every entry including duplicates
+
+        Returns:
+            int: row count
+        """
+        file_uri = f"{self.path.as_uri()}?mode=ro"
+        with sqlite3.connect(file_uri, uri=True) as con:
+            x = con.execute(self.sql_file_count).fetchone()[0]
+        return x
+
+    def hash_count(self) -> int:
+        """number of unique entries in the FILE table.
+           very slow but no duplicates.
+
+        Returns:
+            int: row count
+        """
+        file_uri = f"{self.path.as_uri()}?mode=ro"
+        with sqlite3.connect(file_uri, uri=True) as con:
+            x = con.execute(self.sql_hash_count).fetchone()[0]
+        return x
+    
+    def custom_columns(self, columns: Iterable[str] = None) -> set[str]:
+        """test provided columns against available.
+
+        Args:
+            columns (Iterable[str], optional): If None use all available.
+            If no matches return all available columns.
+            
+            Defaults to None.
+
+        Returns:
+            set[str]: usable columns for generating queries
+        """
+        if columns is not None:
+            clmns = set(columns).intersection(self._custom_columns)
+            if len(clmns) > 0:
+                return clmns
+        return self.available_columns()
+    
+    @classmethod
+    def available_columns(cls) -> set[str]:
+        """usable column names
+
+        Returns:
+            set[str]: valid columns that can be used in queries
+        """
+        return set(cls._custom_columns)
+    
+    def sql_select_column_filter(self, columns: Iterable[str] = None, distinct: bool = False) -> str:
+        """Generate a sql statement with optional columns and distinct
+
+        Args:
+            columns (Iterable[str], optional): which columns to select. 
+                Defaults to None which will get all columns.
+            distinct (bool, optional): only get unique/distinct items. Defaults to False.
+
+        Returns:
+            str: sql select statement
+        """
+        clmns = self.custom_columns(columns)
+        selects = ','.join(clmns)
+        if distinct:
+            sql = f"SELECT {selects} FROM FILE WHERE file_size >= 0 GROUP BY {selects};"
+        else:
+            sql = f"SELECT {selects} FROM FILE;"
+        return sql
+    
+    def enum_dicts(self, query: str) -> Iterator[dict]:
+        """enumerates items in database using dictionary factory
+
+        Args:
+            query (str): sql statement for RDS database
+
+        Yields:
+            Iterator[dict]: all rows returned by query
+        """
+        file_uri = f"{self.path.as_uri()}?mode=ro"
+        with sqlite3.connect(file_uri, uri=True) as con:
+            con.row_factory = RDSReader.dict_factory
+            for row in con.execute(query):
+                yield row
+
+    def enum_tuples(self, query: str, uniqueset: set = None) -> Iterator[tuple]:
+        """enumerates items in database
+
+        Args:
+            query (str): sql statement for RDS database
+            uniqueset (set|None): duplicate tracking. If None (default) do not track duplicates
+
+        Yields:
+            Iterator[tuple]: all rows returned by query
+        """
+        file_uri = f"{self.path.as_uri()}?mode=ro"
+        with sqlite3.connect(file_uri, uri=True) as con:
+            for row in con.execute(query):
+                if uniqueset is not None:
+                    hashid = hash(row)
+                    if hashid in uniqueset:
+                        continue
+                    uniqueset.add(hashid)
+                yield row
+
+    @classmethod
+    def enum_tuples_multi(cls, file_list: List[str], query: str, uniqueset: set = None) -> Iterator[tuple]:
+        for f in file_list:
+            for ds in cls(f).enum_tuples(query, uniqueset=uniqueset):
+                yield ds
+
+    def enum_by_columns(self, columns: Iterable[str] = None, distinct: bool = False) -> Iterator[dict]:
+        """get items from RDS database returning only specific column data
+
+        Args:
+            distinct (bool, optional): only get unique/distinct items. Defaults to False.
+            columns (Iterable[str], optional): which columns to select. 
+                Defaults to None which will get all columns.
+
+        Yields:
+            Iterator[dict]: all rows in dictionary form
+        """
+        sql = self.sql_select_column_filter(distinct=distinct, columns=columns)
+        for itm in self.enum_dicts(sql):
+            yield itm
+    
+    def enum_all(self, distinct: bool = False) -> Iterator[dict]:
+        """get all items with default columns from RDS database
+
+        Args:
+            distinct (bool, optional): only get unique/distinct items. Defaults to False.
+
+        Yields:
+            Iterator[dict]: all rows in dictionary form
+        """
+        sql = self.sql_select_column_filter(distinct=distinct)
+        for itm in self.enum_dicts(sql):
+            yield itm
 
 
 class HashanaDBWriter:
