@@ -975,6 +975,12 @@ class GroupAdapterB(ByteAdapter, SQLAdapter, TableAdapter, CSVAdapter, metaclass
             cls._valid_keys = [dt.label() for dt in cls.data_types()]
         return cls._valid_keys
     
+    @classmethod
+    def from_rds_row(cls, **kwds):
+        """create an instance from a dictionary row of RDS dataset
+        """
+        return cls.from_keywords(**kwds)
+    
     # ByteAdapter
     @classmethod
     def from_keywords(cls, **kwds):
@@ -1090,7 +1096,7 @@ class GroupAdapterB(ByteAdapter, SQLAdapter, TableAdapter, CSVAdapter, metaclass
     @classmethod
     def from_csv_line(cls, line: str, byte_order: str = None):
         return cls.from_hex(line.strip().replace(',',''), byte_order=byte_order)
-        
+    
     # CSVAdapter
     @classmethod
     def csv_header(cls) -> str:

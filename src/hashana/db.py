@@ -451,8 +451,18 @@ class RDSReader:
                 yield row
 
     @classmethod
-    def enum_tuples_multi(cls, file_list: List[str], query: str, uniqueset: set = None) -> Iterator[tuple]:
-        for f in file_list:
+    def enum_tuples_multi(cls, rds_list: List[str], query: str, uniqueset: set = None) -> Iterator[tuple]:
+        """enumerates items in multiple RDS data sets
+
+        Args:
+            file_list (List[str]): RDS datasets to iterate over
+            query (str): query executed to generate results
+            uniqueset (set, optional): duplicate tracking. If None (default) do not track duplicates
+
+        Yields:
+            Iterator[tuple]: all rows returned by query from each file
+        """
+        for f in rds_list:
             for ds in cls(f).enum_tuples(query, uniqueset=uniqueset):
                 yield ds
 
@@ -483,6 +493,90 @@ class RDSReader:
         sql = self.sql_select_column_filter(distinct=distinct)
         for itm in self.enum_dicts(sql):
             yield itm
+
+    def enum_group(self, adapter: GroupAdapterB, distinct: bool = False) -> Iterator[GroupAdapterB]:
+        """Create adapter object for every entry in the RDS Database
+
+        Args:
+            adapter (GroupAdapterB): adapter to format data
+            distinct (bool, optional): True will get only unique items but is slower. Defaults to False.
+
+        Yields:
+            Iterator[GroupAdapterB]: converted rds metadata into group adapter
+        """
+        for d in self.enum_all(distinct=distinct):
+            yield adapter.from_rds_row(**d)
+            
+    def enum_blobs(self,
+                   adapter: GroupAdapterB,
+                   buff_size: int = 4096,
+                   distinct: bool = False) -> Iterator[memoryview]:
+        """Enumerates RDS data into chunks (blobs)
+
+        Args:
+            adapter (GroupAdapterB): adapter to format data
+            buff_size (int, optional): Number of items in buffer. total size will be buff_size * struct_size. Defaults to 4096.
+            distinct (bool, optional): True will get only unique items but is slower. Defaults to False.
+
+        Yields:
+            Iterator[memoryview]: converted rds metadata in binary form. read only.
+        """
+        hb = HBufferB(adapter, buff_size)
+        for i in self.enum_group(adapter=adapter, distinct=distinct):
+            hb.add_adapted(i)
+            if hb.full:
+                yield hb.snapshot()
+                hb.clear()
+        if len(hb) > 0:
+            yield hb.snapshot()
+    
+    def enum_buffers(self,
+                     adapter: GroupAdapterB,
+                     buff_size: int = 4096,
+                     distinct: bool = False) -> Iterator[HBufferB]:
+        """Enumerates RDS data into buffers. Similar to enum_blobs but each item in iterator is separate HBuffer instance
+
+        Args:
+            adapter (GroupAdapterB): adapter to format data
+            buff_size (int, optional): Number of items in buffer. total size will be buff_size * struct_size. Defaults to 4096.
+            distinct (bool, optional): True will get only unique items but is slower. Defaults to False.. Defaults to False.
+
+        Yields:
+            Iterator[HBuffer]: converted rds metadata as buffers
+        """
+        for mv in self.enum_blobs(adapter=adapter, buff_size=buff_size, distinct=distinct):
+            hb = HBufferB(adapter, buff_size)
+            hb.add_bytes(mv)
+            yield hb
+
+    @classmethod
+    def make_csv(cls, rds_list: Iterable[str], output_csv: str) -> int:
+        """creates a hashana csv file from the NSRL RDS. it is recommended to use the "minimal" set.
+            This is very slow and requires a lot of memory (20GB+ for all sets) due to tracking duplicates.
+            The duplicate tracking in python was faster than letting sqlite3 get unique values (in testing).
+            Of course, all these recommendations depend heavily on hardware.
+
+        Args:
+            rds_list (Iterable[str]): an iterable list of fiel paths to the NSRL RDS sqlite databases.
+            output_csv (str): path to newly created hashana csv
+
+        Returns:
+            int: number of unique items inserted into file
+        """
+        tracking = set()
+        clms = "file_size,md5,sha1,sha256"
+        qry = f"SELECT {clms} FROM FILE"
+        with open(output_csv, 'wt', newline='') as csvfile:
+            csvfile.write(clms + '\n')
+            for rds in rds_list:
+                for ds in cls(rds).enum_tuples_multi(rds_list, query=qry, uniqueset=set()):
+                    hashid = hash(ds)
+                    #hashid = hash(ds['3'])
+                    if hashid in tracking:
+                        continue
+                    tracking.add(hashid)
+                    csvfile.write(','.join(ds) + '\n')
+        return len(tracking)
 
 
 class HashanaDBWriter:
@@ -552,9 +646,6 @@ class HashanaDBWriter:
     def import_blob(self,
                     blob_file: str,
                     adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
-                    initialize: bool = False,
-                    create_indexes: bool = False,
-                    commit: bool = False,
                     byte_order: str = None,
                     uniqueset: set = None) -> int:
         """Import data from a blob of data
@@ -563,9 +654,6 @@ class HashanaDBWriter:
             blob_file (str): path to blob file
             adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
                 defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
-            initialize (bool): create tables defined in adapter. this happens before any other db ops
-            create_indexes (bool): create indexes defined in TableAdapter. This occurs at the end
-            commit (bool): perform a commit. this happens after all insertions but before creating indexes
             byte_order (str): byte order of data in blob
             uniqueset (set): set of hashes used for tracking duplicates across multiple files.
                 if none, duplicates will not be tracked. this is faster and uses less memory.
@@ -574,9 +662,6 @@ class HashanaDBWriter:
             int - number of items inserted
         """
         inserted = 0
-        
-        if initialize:
-            self.create_tables([adapter])
         
         blobfile = BLOBFileB(adapter=adapter, file_path=blob_file, byte_order=byte_order)
         sqlinsert = adapter.sql_insert()
@@ -590,21 +675,12 @@ class HashanaDBWriter:
             inserted += 1
             self._conn.execute(sqlinsert, i.as_sql_values())
         
-        if commit:
-            self.commit()
-        
-        if create_indexes:
-            self.create_indexes([adapter])
-        
         return inserted
     
     def import_rds(self,
                     rds_file: str,
                     adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
                     buffer_size: int = 4096,
-                    initialize: bool = False,
-                    create_indexes: bool = False,
-                    commit: bool = False,
                     uniqueset: set = None) -> int:
         """Import data from a NSRL RDS data set.
         
@@ -612,9 +688,6 @@ class HashanaDBWriter:
             rds_file (str): path to rds file
             adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
                 defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
-            initialize (bool): create tables defined in adapter. this happens before any other db ops
-            create_indexes (bool): create indexes defined in TableAdapter. This occurs at the end
-            commit (bool): perform a commit. this happens after all insertions but before creating indexes
             uniqueset (set): set of hashes used for tracking duplicates across multiple files.
                 if none, duplicates will not be tracked. this is faster and uses less memory.
         
@@ -622,11 +695,8 @@ class HashanaDBWriter:
             int - number of items inserted
         """
         
-        buffr = HBufferB(adapter, size=buffer_size, byte_order='!')
+        buffr = HBufferB(HashanaDataB, size=buffer_size, byte_order='!')
         inserted = 0
-        
-        if initialize:
-            self.create_tables([adapter])
         
         if uniqueset is None:
             qry = "SELECT file_size,md5,sha1,sha256 FROM FILE;"
@@ -642,12 +712,6 @@ class HashanaDBWriter:
             if buffr.full:
                 inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
         inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
-        
-        if commit:
-            self.commit()
-        
-        if create_indexes:
-            self.create_indexes([adapter])
         
         return inserted
         
@@ -796,91 +860,8 @@ class HashanaDBWriter:
         self.commit()
         self._conn.execute("detach database dba")
 
-
-class HashanaRDSReaderB(RDSReader):
-    """Reads NSRL RDS sqlite database and converts data to HashanaData
-    """
-    
-    def __init__(self, path):
-        super().__init__(path)
-
-    def enum_hashana_data(self, distinct: bool = False) -> Iterator[HashanaDataB]:
-        """Create HashanaData object for every entry in the RDS Database
-
-        Args:
-            distinct (bool, optional): True will get only unique items but is slower. Defaults to False.
-
-        Yields:
-            Iterator[HashanaData]: converted rds metadata
-        """
-        for d in self.enum_all(distinct=distinct):
-            yield HashanaDataB.from_rds_row(**d)
-    
-    def enum_blobs(self, buff_size: int = 4096, distinct: bool = False) -> Iterator[memoryview]:
-        """Enumerates RDS data into chunks (blobs)
-
-        Args:
-            buff_size (int, optional): Number of items in buffer. total size will be buff_size * struct_size. Defaults to 4096.
-            distinct (bool, optional): True will get only unique items but is slower. Defaults to False.. Defaults to False.
-
-        Yields:
-            Iterator[memoryview]: converted rds metadata in binary form. read only.
-        """
-        hb = HBufferB(HashanaDataB, buff_size)
-        for i in self.enum_hashana_data(distinct=distinct):
-            hb.add_adapted(i)
-            if hb.full:
-                yield hb.snapshot()
-                hb.clear()
-        if len(hb) > 0:
-            yield hb.snapshot()
-
-    def enum_buffers(self, buff_size: int = 4096, distinct: bool = False) -> Iterator[HBufferB]:
-        """Enumerates RDS data into buffers. Similar to enum_blobs but each item in iterator is separate HBuffer instance
-
-        Args:
-            buff_size (int, optional): Number of items in buffer. total size will be buff_size * struct_size. Defaults to 4096.
-            distinct (bool, optional): True will get only unique items but is slower. Defaults to False.. Defaults to False.
-
-        Yields:
-            Iterator[HBuffer]: converted rds metadata as buffers
-        """
-        for mv in self.enum_blobs(buff_size=buff_size, distinct=distinct):
-            hb = HBufferB(HashanaDataB, buff_size)
-            hb.add_bytes(mv)
-            yield hb
-
-    def save_blob(self, output_file: str, append: bool = True, uniqueset: set | None = None) -> int:
-        """Saves RDS items into a binary blob file
-        """        
-        total_bytes = 0
-        op = Path(output_file)
-        if op.exists() and op.is_dir():
-            raise FileNotFoundError("output file is a directory")
-        
-        if append:
-            out_file = open(op.absolute(), 'ba')
-        else:
-            out_file = open(op.absolute(), 'wb')
-        
-        if uniqueset is None:
-            qry = "SELECT file_size,md5,sha1,sha256 FROM FILE;"
-        else:
-            # the RDS set hashes should all be in uppercase, but ensure for consistency
-            qry = "SELECT file_size,upper(md5),upper(sha1),upper(sha256) FROM FILE;"
-        
-        for ds in self.enum_tuples(query=qry, uniqueset=uniqueset):
-            total_bytes += out_file.write(pack(FileSizeB.structure('!'), int((ds[0]))))
-            total_bytes += out_file.write(bytes.fromhex(ds[1]))
-            total_bytes += out_file.write(bytes.fromhex(ds[2]))
-            total_bytes += out_file.write(bytes.fromhex(ds[3]))
-        
-        out_file.close()
-        
-        return total_bytes
-
     @classmethod
-    def make_hashana_db(cls, rds_list: Iterable[str], output_db: str) -> int:
+    def from_rds_list(cls, rds_list: Iterable[str], output_db: str, adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB) -> int:
         """creates a hashana sqlite database from the NSRL RDS. it is recommended to use the "minimal" set.
             This is very slow and requires a lot of memory (20GB+ for all sets) due to tracking duplicates.
             The duplicate tracking in python was faster than letting sqlite3 get unique values (in testing).
@@ -889,62 +870,22 @@ class HashanaRDSReaderB(RDSReader):
         Args:
             rds_list (Iterable[str]): an iterable list of fiel paths to the NSRL RDS sqlite databases.
             output_db (str): path to newly created hashana sqlite database
+            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
+                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
 
         Returns:
             int: number of unique items inserted into database
         """
-        
         trackset = set()
         inserted = 0
         
-        with HashanaDBWriter(output_db) as hashana_db:
+        with cls(output_db) as hashana_db:
+            hashana_db.create_tables([adapter])
             for i in range(0, len(rds_list)):
-                initialize = False
-                commit = False
-                create_index = False
-                
-                if i == 0:
-                    initialize = True
-                elif i == (len(rds_list) - 1):
-                    create_index = True
-                    commit = True
-                
-                inserted += hashana_db.import_rds(rds_list[i], 
-                                                    adapter=HashanaDataB, 
-                                                    commit=commit, 
-                                                    create_indexes=create_index, 
-                                                    initialize=initialize,
-                                                    uniqueset=trackset)
-        
+                inserted += hashana_db.import_rds(rds_list[i], adapter=adapter, uniqueset=trackset)
+            hashana_db.commit()
+            hashana_db.create_indexes([adapter])
         return inserted
-
-    @classmethod
-    def make_hashana_csv(cls, rds_list: Iterable[str], output_csv: str) -> int:
-        """creates a hashana csv file from the NSRL RDS. it is recommended to use the "minimal" set.
-            This is very slow and requires a lot of memory (20GB+ for all sets) due to tracking duplicates.
-            The duplicate tracking in python was faster than letting sqlite3 get unique values (in testing).
-            Of course, all these recommendations depend heavily on hardware.
-
-        Args:
-            rds_list (Iterable[str]): an iterable list of fiel paths to the NSRL RDS sqlite databases.
-            output_csv (str): path to newly created hashana csv
-
-        Returns:
-            int: number of unique items inserted into file
-        """
-        tracking = set()
-        with open(output_csv, 'wt', newline='') as csvfile:
-            csvfile.write(HashanaDataB.csv_header())
-            for rds in rds_list:
-                for ds in HashanaRDSReaderB(rds).enum_all():
-                    itms = (ds['file_size'],ds['md5'],ds['sha1'],ds['sha256'])
-                    hashid = hash(itms)
-                    #hashid = hash(ds['sha256'])
-                    if hashid in tracking:
-                        continue
-                    tracking.add(hashid)
-                    csvfile.write(','.join(itms) + '\n')
-        return len(tracking)
 
 
 class HashanaReplier(HashanaDBReader):

@@ -12,7 +12,8 @@ Example to convert the RDS data (may take 1 hour or more depending on hardware):
 ```
 rds_list = [r"C:\NSRL\RDS_2023.12.1_modern_minimal.db", r"C:\NSRL\RDS_2023.12.1_legacy_minimal.db", \
   r"C:\NSRL\RDS_2023.12.1_android_minimal.db", r"C:\NSRL\RDS_2023.12.1_ios_minimal.db"]
-HashanaRDSReader.make_hashana_db(rds_list, r"C:\NSRL\hashana_23.12.1.db")
+
+HashanaDBWriter.from_rds_list(rds_list, r"C:\NSRL\hashana_23.12.1.db")
 ```
 
 An example zmq server, linux service, and Dockerfile are in extra/linux

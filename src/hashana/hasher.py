@@ -127,7 +127,7 @@ class Hasher:
             report['exception'] = str(e)
             return report
         
-        report = report.update(hshr.report())
+        report.update(hshr.report())
         report['success'] = True
         return report
     
@@ -174,43 +174,40 @@ class Hasher:
                     sha512=sha512)
 
 
-class HasherConcurrent:
+class HashConcurrent:
     max_threads: int
+    use_mp: bool
     
-    def __init__(self, max_threads:int = 2):
-        self.max_threads = max(max_threads, 1)
-
-    def hash_files_threads(self, file_list: Iterable[str], cfg: dict | None = None) -> Iterator[dict]:
-        """Hash files and generate dictionary report as they finish.
-
+    def __init__(self, max_threads: int = 2, use_mp: bool = False):
+        """Can hash multiple files at the same time. May be faster, depending on resources, than hashing individually.
+        
         Args:
-            file_list (Iterable[str]): Iterable of file paths
-            cfg (dict): hasher configuration
-
-        Yields:
-            dict: dictionary report of hash information / metadata for each file in list
+            max_threads (int): number of available threads or process in the pool. default 2
+            use_mp (bool): use multiprocessing instead of threads. default False
         """
-        with futures.ThreadPoolExecutor(self.max_threads) as executor:
-            flist = list()
-            for f in file_list:
-                flist.append(executor.submit(Hasher.hash_file_worker, f, cfg))
-            for fr in futures.as_completed(flist):
-                yield fr.result()
-                
-    def hash_files_processes(self, file_list: Iterable[str], cfg: dict | None = None) -> Iterator[dict]:
-        """Hash files and generate dictionary report as they finish.
+        self.max_threads = max_threads
+        self.use_mp = use_mp
 
+    def hash_files(self, file_list: Iterable[str], cfg: dict | None = None)-> Iterator[dict]:
+        """hash multiple files using concurrency
+        
         Args:
-            file_list (Iterable[str]): Iterable of file paths
-            cfg (dict): hasher configuration
-
-        Yields:
-            dict: dictionary report of hash information / metadata for each file in list
+            file_list (Iterable[str]): file paths to hash
+            cfg (dict|None): Hasher config. If None (default) then use the Hasher class default config
+            
+        yields:
+            Iterator[dict]: report for each file as completed
         """
-        with futures.ProcessPoolExecutor(self.max_threads) as executor:
-            flist = list()
-            for f in file_list:
-                flist.append(executor.submit(Hasher.hash_file_worker, f, cfg))
-            for fr in futures.as_completed(flist):
-                yield fr.result()
+        if self.use_mp:
+            executor = futures.ProcessPoolExecutor(max_workers=self.max_threads)
+        else:
+            executor = futures.ThreadPoolExecutor(max_workers=self.max_threads)
+            
+        flist = list()
+        for f in file_list:
+            flist.append(executor.submit(Hasher.hash_file_worker, f, cfg))
+        for fr in futures.as_completed(flist):
+            yield fr.result()
 
+        executor.shutdown(True)
+        

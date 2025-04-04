@@ -5,7 +5,7 @@ from multiprocessing.shared_memory import SharedMemory
 from os import remove
 
 from .adapters import HexAdapter, SQLAdapter, ByteAdapter, BLOBAdapterB, ByteOrder
-from .exceptions import InvalidHexError, InvalidIPAddressError, InvalidAdapterError
+from .exceptions import InvalidIPAddressError
 
 
 class IP4B(ByteAdapter, SQLAdapter):
