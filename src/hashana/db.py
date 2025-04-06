@@ -851,6 +851,65 @@ class RDSReader:
             yield hb
 
     @classmethod
+    def make_blob(cls,
+                rds_list: List[str],
+                blob_path: str,
+                hasher_cfg: dict = None,
+                append: bool = False,
+                uniqueset: set = None,
+                adapter: GroupAdapterB = HashanaDataB) -> dict:
+        """convert to a blob of data based on an adapter's byte layout
+
+        Args:
+            rds_list (Iterable[str]): an iterable list of file paths to the NSRL RDS sqlite databases.
+            blob_path (str): output blob file.
+            hasher_cfg (dict, optional): Hasher configuration. None will disable hashing.
+                Set to empty dictionary to use defaults.
+                Defaults to None.
+            append (bool, optional): if file exists, append bytes to end of file.
+                Defaults to False.
+            uniqueset (set, optional): track uniques using a python set. None will disable python tracking.
+                Defaults to None.
+            adapter (GroupAdapterB, optional): adapter to convert to bytes.
+                Defaults to HashanaDataB.
+
+        Raises:
+            FileNotFoundError: specified output file is a directory
+
+        Returns:
+            dict: hasher report. will be only filesize if hashing is disabled
+        """
+        if not isinstance(hasher_cfg, dict):
+            hasher_cfg = dict(md5=False, sha1=False, sha256=False, sha224=False, sha384=False, sha512=False)
+        hasher = Hasher(**hasher_cfg)
+        total_bytes = 0
+        
+        outblob = Path(blob_path)
+        
+        if outblob.exists() and outblob.is_dir():
+            raise FileNotFoundError("output file is a directory")
+        
+        if outblob.exists() and append:
+            out_file = open(outblob.absolute(), 'ba')
+        else:
+            out_file = open(outblob.absolute(), 'wb')
+        
+        clms = "file_size,md5,sha1,sha256"
+        qry = f"SELECT {clms} FROM FILE"
+        for itm in cls.enum_tuples_multi(rds_list=rds_list, query=qry, uniqueset=uniqueset):
+            ga = adapter.from_rds_row(file_size=itm[0],
+                                       md5=itm[1],
+                                       sha1=itm[2],
+                                       sha256=itm[3])
+            gbytes = ga.as_bytes()
+            total_bytes += out_file.write(gbytes)
+            hasher.update(gbytes)
+
+        out_file.close()
+        
+        return hasher.report()
+
+    @classmethod
     def make_csv(cls, rds_list: Iterable[str], output_csv: str) -> int:
         """creates a hashana csv file from the NSRL RDS. it is recommended to use the "minimal" set.
             This is very slow and requires a lot of memory (20GB+ for all sets) due to tracking duplicates.
@@ -858,7 +917,7 @@ class RDSReader:
             Of course, all these recommendations depend heavily on hardware.
 
         Args:
-            rds_list (Iterable[str]): an iterable list of fiel paths to the NSRL RDS sqlite databases.
+            rds_list (Iterable[str]): an iterable list of file paths to the NSRL RDS sqlite databases.
             output_csv (str): path to newly created hashana csv
 
         Returns:
