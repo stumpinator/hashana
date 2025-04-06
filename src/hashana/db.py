@@ -7,7 +7,7 @@ from pathlib import Path
 from .adapters import SQLAdapter, TableAdapter, HexAdapter, GroupAdapterB, ByteAdapter, ByteOrder
 from .adapted import FileSizeB, MD5B, SHA1B, SHA256B, HBufferB, BLOBFileB
 from .hasher import Hasher
-from .exceptions import InvalidHexError, NotConnectedError, InvalidAdapterError
+from .exceptions import InvalidHexError, NotConnectedError, InvalidAdapterError, InvalidDBModeError
 
 
 HASH_ZERO_LENGTH = {'file_size': 0, 
@@ -41,21 +41,6 @@ class HashanaDataB(GroupAdapterB):
         buffer += bytes.fromhex(kwds['sha256'])
         return cls(buffer, byte_order=ByteOrder.NET)
     
-    @classmethod
-    def from_keywords(cls, **kwds):
-        """create instance of class from keywords or dictionary.
-        expected_keywords = set('file_size', 'md5', 'sha1', 'sha256')
-
-        Returns:
-            HashanaDataB
-        """
-        objs = list()
-        objs.append(FileSizeB.from_ints(kwds[FileSizeB.label()]))
-        objs.append(MD5B(bytes.fromhex(kwds[MD5B.label()])))
-        objs.append(SHA1B(bytes.fromhex(kwds[SHA1B.label()])))
-        objs.append(SHA256B(bytes.fromhex(kwds[SHA256B.label()])))
-        return super().from_objs(*objs, byte_order=kwds.get('byte_order', None))
-        
     def as_dict(self) -> dict:
         ret = dict()
         ret['byte_order'] = self._stored_order
@@ -83,48 +68,81 @@ class HashanaDataB(GroupAdapterB):
         return cls(buffer, byte_order=ByteOrder.NET)
 
 
-class HashanaDBReader:
+class HashanaSQLite:
     """Interface to read hashana sqlite database.
     """
     _path: str
     _pathobj: Path
     _conn: sqlite3.Connection
+    _autocommit: bool
     _tracking: int
+    _readonly: bool
+    _synchronous: str
+    _journal_mode: str
     
-    def __init__(self, path: str):
+    def __init__(self,
+                 path: str,
+                 autocommit: bool = True,
+                 journal_mode: str = 'WAL',
+                 synchronous: str = None,
+                 readonly: bool = True):
         """
         Args:
             path (str): path to sqlite database
+            autocommit (bool, optional): perform commit automatically on close. Defaults to True.
+            journal_mode (str, optional): sqlite journal mode. Supports: None/WAL/MEMORY. Defaults to 'WAL'.
+            synchronous (str, optional): sqlite synchronous pragma option. Supprots: None/EXTRA/OFF. Defaults to None.
+            readonly (bool): read only mode
         """
+        self._synchronous = synchronous # EXTRA, OFF
+        self._journal_mode = journal_mode # WAL, MEMORY
         self._path = path
         self._conn = None
+        self._autocommit = autocommit
         self._tracking = 0
         self._pathobj = Path(self._path)
-        if not self._pathobj.exists():
-            raise FileNotFoundError("Path is not a valid file")
+        self._readonly = readonly
+        if not readonly and not self._pathobj.exists():
+            raise FileNotFoundError("Path is not a valid file. Turn off readonly mode or choose existing database")
         
     def __enter__(self):
         self.connect()
         return self
     
+    def _create_conn(self) -> sqlite3.Connection:
+        sconn: sqlite3.Connection = None
+        if self._readonly:
+            file_uri = f"{self._pathobj.as_uri()}?mode=ro"
+            sconn = sqlite3.connect(file_uri, uri=True)
+        else:
+            sconn = sqlite3.connect(self._path)
+            # automagic pragma statements
+            if self._synchronous in ['EXTRA', 'OFF']:
+                sconn.execute(f"PRAGMA synchronous = {self._synchronous}")
+            if self._journal_mode in ['WAL', 'MEMORY']:
+                sconn.execute(f"PRAGMA journal_mode = {self._journal_mode}")
+        
+        return sconn
+    
     def connect(self) -> bool:
         self._tracking += 1
         if self._conn is None:
-            file_uri = f"{self._pathobj.as_uri()}?mode=ro"
-            self._conn = sqlite3.connect(file_uri, uri=True)
+            self._conn = self._create_conn()
             return True
         return None
             
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
+        self.close(self._autocommit)
     
     def __del__(self):
         if self._conn is not None:
             self._tracking = 1
-            self.close()
+            self.close(False)
     
-    def close(self) -> bool:
+    def close(self, commit: bool = False) -> bool:
         if self._conn is not None:
+            if commit:
+                self.commit()
             self._tracking = max(0, self._tracking - 1)
             if self._tracking == 0:
                 self._conn.close()
@@ -133,19 +151,41 @@ class HashanaDBReader:
         return None
 
     def commit(self):
-        raise NotImplementedError("DB interface is read only")
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
+        
+        if not self._readonly:
+            self._conn.commit()
     
     @property
     def path(self):
         return self._path
     
     @property
-    def connection(self):
+    def connection(self) -> sqlite3.Connection:
         return self._conn
     
     @property
     def connected(self) -> bool:
         return self._conn is not None
+    
+    @property
+    def autocommit(self):
+        return self._autocommit
+    
+    def backup_to(self, db_path: str):
+        """WARNING: this will clobber target database contents!
+        copy contents of database to another.
+        useful for creating databases in memory and then copying to disk.
+
+        Args:
+            db_path (str): file path to new database
+        """
+        self.commit()
+        outdb = sqlite3.connect(db_path)
+        self._conn.backup(outdb)
+        outdb.commit()
+        outdb.close()
     
     def calculate_signature(self, adapter: ByteAdapter|HexAdapter|SQLAdapter, hasher_cfg: dict|None = None) -> dict:
         """hack clone of the dbhash program. determines if *contents* of database have changed.
@@ -318,6 +358,267 @@ class HashanaDBReader:
         else:
             return None
 
+    def _ro_check(self):
+        if self._readonly:
+            raise InvalidDBModeError("Database connection is in read only mode")
+
+    def import_blob(self,
+                    blob_file: str,
+                    adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
+                    byte_order: str = None,
+                    uniqueset: set = None) -> int:
+        """Import data from a blob of data
+        
+        Args:
+            blob_file (str): path to blob file
+            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
+                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
+            byte_order (str): byte order of data in blob
+            uniqueset (set): set of hashes used for tracking duplicates across multiple files.
+                if none, duplicates will not be tracked. this is faster and uses less memory.
+        
+        Returns:
+            int - number of items inserted
+        """
+        self._ro_check()
+        
+        inserted = 0
+        
+        blobfile = BLOBFileB(adapter=adapter, file_path=blob_file, byte_order=byte_order)
+        sqlinsert = adapter.sql_insert()
+        
+        for i in blobfile.items():
+            if uniqueset is not None:
+                hashid = hash(i)
+                if hashid in uniqueset:
+                    continue
+                uniqueset.add(hashid)
+            inserted += 1
+            self._conn.execute(sqlinsert, i.as_sql_values())
+        
+        return inserted
+
+    def import_rds(self,
+                    rds_file: str,
+                    adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
+                    buffer_size: int = 4096,
+                    uniqueset: set = None) -> int:
+        """Import data from a NSRL RDS data set.
+        
+        Args:
+            rds_file (str): path to rds file
+            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
+                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
+            uniqueset (set): set of hashes used for tracking duplicates across multiple files.
+                if none, duplicates will not be tracked. this is faster and uses less memory.
+        
+        Returns:
+            int - number of items inserted
+        """
+        self._ro_check()
+        
+        buffr = HBufferB(HashanaDataB, size=buffer_size, byte_order='!')
+        inserted = 0
+        
+        if uniqueset is None:
+            qry = "SELECT file_size,md5,sha1,sha256 FROM FILE;"
+        else:
+            # the RDS set hashes should all be in uppercase, but ensure for consistency
+            qry = "SELECT file_size,upper(md5),upper(sha1),upper(sha256) FROM FILE;"
+        
+        for ds in RDSReader(rds_file).enum_tuples(query=qry, uniqueset=uniqueset):
+            buffr.add_bytes(pack(FileSizeB.structure('!'), int((ds[0]))))
+            buffr.add_bytes(bytes.fromhex(ds[1]))
+            buffr.add_bytes(bytes.fromhex(ds[2]))
+            buffr.add_bytes(bytes.fromhex(ds[3]))
+            if buffr.full:
+                inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
+        inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
+        
+        return inserted
+
+    def create_tables(self, tables:Iterable[TableAdapter]) -> set[TableAdapter]:
+        """create tables in database. does not create indexes (see create_indexes)
+
+        Args:
+            tables (Iterable[TableAdapter]): all tables to create in database
+
+        Returns:
+            set[TableAdapter]: _description_
+        """
+        self._ro_check()
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
+        created = set()
+        for tbl in tables:
+            if tbl not in created:
+                created.add(tbl)
+                self._conn.execute(tbl.sql_table_create())
+        return created
+
+    def create_indexes(self, indexes:Iterable[TableAdapter]) -> set[TableAdapter]:
+        """creates indexes on the tables. fails if tables do not exist (see create_tables)
+
+        Args:
+            indexes (Iterable[TableAdapter]): all indexes to add to respective tables
+
+        Returns:
+            set[TableAdapter]: number of CREATE INDEX statements executed. does not determine if previously created.
+        """
+        self._ro_check()
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
+        created = set()
+        for tbl in indexes:
+            if tbl not in created:
+                created.add(tbl)
+                for idx in tbl.sql_table_create_indexes():
+                    self._conn.execute(idx)
+        return created
+
+    def insert_buffer(self, buffer: HBufferB, clear: bool = False) -> int:
+        """inserts multiple items to the database using a buffer. single transaction.
+        wrapper for insert_buffer_class
+        
+        Args:
+            buffer (HBufferB): buffer item to be inserted. 
+            clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
+        
+        Raises:
+            ValueError: buffer adapter is not subclass of SQLAdapter
+            
+        Returns:
+            int: number of new items added to database
+        """
+        return self.insert_buffer_class(buffer=buffer, sql_class=buffer.adapter, clear=clear)
+
+    def insert_buffer_class(self, buffer: HBufferB, sql_class: SQLAdapter, clear: bool = False) -> int:
+        """inserts multiple items to the database using a buffer. single transaction.
+
+        Args:
+            buffer (HBufferB): buffer item to be inserted.
+            sql_class (SQLAdapter): data class to insert into database
+            clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
+        
+        Raises:
+            InvalidAdapterError: sql_class is not subclass of SQLAdapter
+            NotConnectedError: no connection
+            
+        Returns:
+            int: number of new items added to database
+        """
+        self._ro_check()
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
+        if len(buffer) <= 0:
+            return 0
+        sql_class = cast(SQLAdapter, sql_class)
+        inserted = self._conn.executemany(sql_class.sql_insert(), buffer.as_tuples()).rowcount
+        
+        if clear:
+            buffer.clear()
+        
+        return inserted
+
+    def insert_hashes(self, hash_items: Iterable[SQLAdapter]) -> int:
+        """inserts items one at a time. does not require homogenous items.
+        this is slow for mass inserts. if speed is required use hashbuffers.
+
+        Args:
+            hash_items (Iterable[SQLAdapter]): items to be inserted
+
+        Returns:
+            int: number of new items added to database
+        """
+        self._ro_check()
+        if self._conn is None:
+            raise NotConnectedError("Not connected")
+        inserted = 0
+        for itm in hash_items:
+            inserted += self._conn.execute(itm.sql_insert(), itm.as_sql_values()).rowcount
+        return inserted
+
+    def _merge_to(self, db_path: str):
+        """attempts to insert items from current database into other database.
+        testing/experimental. use at your own risk.
+
+        Args:
+            db_path (str): file path to other database
+        """
+        self.commit()
+        
+        self._conn.execute("ATTACH '" + db_path + "' as dba")
+        self._conn.execute("BEGIN")
+        for row in self._conn.execute("SELECT * FROM sqlite_master WHERE type='table'"):
+            combine = "INSERT OR IGNORE INTO dba."+ row[1] + " SELECT * FROM " + row[1]
+            self._conn.execute(combine)
+        
+        self.commit()
+        self._conn.execute("detach database dba")
+
+    @classmethod
+    def from_rds_list(cls, rds_list: Iterable[str], output_db: str, adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB) -> int:
+        """creates a hashana sqlite database from the NSRL RDS. it is recommended to use the "minimal" set.
+            This is very slow and requires a lot of memory (20GB+ for all sets) due to tracking duplicates.
+            The duplicate tracking in python was faster than letting sqlite3 get unique values (in testing).
+            Of course, all these recommendations depend heavily on hardware.
+
+        Args:
+            rds_list (Iterable[str]): an iterable list of fiel paths to the NSRL RDS sqlite databases.
+            output_db (str): path to newly created hashana sqlite database
+            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
+                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
+
+        Returns:
+            int: number of unique items inserted into database
+        """
+        trackset = set()
+        inserted = 0
+        
+        with cls(output_db, readonly=False) as hashana_db:
+            hashana_db.create_tables([adapter])
+            for i in range(0, len(rds_list)):
+                inserted += hashana_db.import_rds(rds_list[i], adapter=adapter, uniqueset=trackset)
+            hashana_db.commit()
+            hashana_db.create_indexes([adapter])
+        return inserted
+
+
+class HashanaDBReader(HashanaSQLite):
+    """Interface to read hashana sqlite database.
+    """
+    
+    def __init__(self, path: str):
+        """
+        Args:
+            path (str): path to sqlite database
+        """
+        super().__init__(path=path,
+                         autocommit=False,
+                         readonly=True)
+
+
+class HashanaDBWriter(HashanaSQLite):
+    """Interface to create/modify hashana sqlite database.
+    """
+    def __init__(self,
+                 path: str,
+                 autocommit: bool = True,
+                 journal_mode: str = 'WAL',
+                 synchronous: str = None):
+        """
+        Args:
+            path (str): path to sqlite database
+            autocommit (bool, optional): perform commit automatically on close. Defaults to True.
+            journal_mode (str, optional): sqlite journal mode. Supports: None/WAL/MEMORY. Defaults to 'WAL'.
+            synchronous (str, optional): sqlite synchronous pragma option. Supprots: None/EXTRA/OFF. Defaults to None.
+        """
+        super().__init__(path=path,
+                         autocommit=autocommit,
+                         journal_mode=journal_mode,
+                         synchronous=synchronous,
+                         readonly=False)
+ 
 
 class RDSReader:
     """Read and enumerate files in the NSRL Reference Data Set (RDS)"""
@@ -577,315 +878,6 @@ class RDSReader:
                     tracking.add(hashid)
                     csvfile.write(','.join(ds) + '\n')
         return len(tracking)
-
-
-class HashanaDBWriter:
-    """Interface to create/modify hashana sqlite database.
-    """
-    _path: str
-    _conn: sqlite3.Connection
-    _autocommit: bool
-    _tracking: int
-    _synchronous: str
-    _journal_mode: str
-    
-    def __init__(self, path: str, autocommit: bool = True, journal_mode: str = 'WAL', synchronous: str = None):
-        """
-        Args:
-            path (str): path to sqlite database
-            autocommit (bool, optional): perform commit automatically on close. Defaults to True.
-            journal_mode (str, optional): sqlite journal mode. Supports: None/WAL/MEMORY. Defaults to 'WAL'.
-            synchronous (str, optional): sqlite synchronous pragma option. Supprots: None/EXTRA/OFF. Defaults to None.
-        """
-        self._synchronous = synchronous # EXTRA, OFF
-        self._journal_mode = journal_mode # WAL, MEMORY
-        self._path = path
-        self._conn = None
-        self._autocommit = autocommit
-        self._tracking = 0
-        
-    def __enter__(self):
-        self.connect()
-        return self
-    
-    def connect(self) -> bool:
-        self._tracking += 1
-        if self._conn is None:
-            self._conn = sqlite3.connect(self._path)
-            # automagic pragma statements
-            if self._synchronous in ['EXTRA', 'OFF']:
-                self._conn.execute(f"PRAGMA synchronous = {self._synchronous}")
-            if self._journal_mode in ['WAL', 'MEMORY']:
-                self._conn.execute(f"PRAGMA journal_mode = {self._journal_mode}")
-            return True
-        return None
-            
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close(self._autocommit)
-    
-    def __del__(self):
-        self._tracking = 1
-        self.close(False)
-    
-    @property
-    def path(self):
-        return self._path
-    
-    @property
-    def connection(self):
-        return self._conn
-    
-    @property
-    def connected(self) -> bool:
-        return self._conn is not None
-    
-    @property
-    def autocommit(self):
-        return self._autocommit
-    
-    def import_blob(self,
-                    blob_file: str,
-                    adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
-                    byte_order: str = None,
-                    uniqueset: set = None) -> int:
-        """Import data from a blob of data
-        
-        Args:
-            blob_file (str): path to blob file
-            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
-                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
-            byte_order (str): byte order of data in blob
-            uniqueset (set): set of hashes used for tracking duplicates across multiple files.
-                if none, duplicates will not be tracked. this is faster and uses less memory.
-        
-        Returns:
-            int - number of items inserted
-        """
-        inserted = 0
-        
-        blobfile = BLOBFileB(adapter=adapter, file_path=blob_file, byte_order=byte_order)
-        sqlinsert = adapter.sql_insert()
-        
-        for i in blobfile.items():
-            if uniqueset is not None:
-                hashid = hash(i)
-                if hashid in uniqueset:
-                    continue
-                uniqueset.add(hashid)
-            inserted += 1
-            self._conn.execute(sqlinsert, i.as_sql_values())
-        
-        return inserted
-    
-    def import_rds(self,
-                    rds_file: str,
-                    adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB,
-                    buffer_size: int = 4096,
-                    uniqueset: set = None) -> int:
-        """Import data from a NSRL RDS data set.
-        
-        Args:
-            rds_file (str): path to rds file
-            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
-                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
-            uniqueset (set): set of hashes used for tracking duplicates across multiple files.
-                if none, duplicates will not be tracked. this is faster and uses less memory.
-        
-        Returns:
-            int - number of items inserted
-        """
-        
-        buffr = HBufferB(HashanaDataB, size=buffer_size, byte_order='!')
-        inserted = 0
-        
-        if uniqueset is None:
-            qry = "SELECT file_size,md5,sha1,sha256 FROM FILE;"
-        else:
-            # the RDS set hashes should all be in uppercase, but ensure for consistency
-            qry = "SELECT file_size,upper(md5),upper(sha1),upper(sha256) FROM FILE;"
-        
-        for ds in RDSReader(rds_file).enum_tuples(query=qry, uniqueset=uniqueset):
-            buffr.add_bytes(pack(FileSizeB.structure('!'), int((ds[0]))))
-            buffr.add_bytes(bytes.fromhex(ds[1]))
-            buffr.add_bytes(bytes.fromhex(ds[2]))
-            buffr.add_bytes(bytes.fromhex(ds[3]))
-            if buffr.full:
-                inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
-        inserted += self.insert_buffer_class(buffr, sql_class=adapter, clear=True)
-        
-        return inserted
-        
-    def close(self, commit: bool = False):
-        if self._conn is not None:
-            if commit:
-                self.commit()
-            self._tracking = max(0, self._tracking - 1)
-            if self._tracking == 0:
-                self._conn.close()
-                self._conn = None
-                return True
-        return None
-
-    def commit(self):
-        if self._conn is None:
-            raise NotConnectedError("Not connected")
-        self._conn.commit()
-    
-    def create_tables(self, tables:Iterable[TableAdapter]) -> set[TableAdapter]:
-        """create tables in database. does not create indexes (see create_indexes)
-
-        Args:
-            tables (Iterable[TableAdapter]): all tables to create in database
-
-        Returns:
-            set[TableAdapter]: _description_
-        """
-        if self._conn is None:
-            raise NotConnectedError("Not connected")
-        created = set()
-        for tbl in tables:
-            if tbl not in created:
-                created.add(tbl)
-                self._conn.execute(tbl.sql_table_create())
-        return created
-    
-    def create_indexes(self, indexes:Iterable[TableAdapter]) -> set[TableAdapter]:
-        """creates indexes on the tables. fails if tables do not exist (see create_tables)
-
-        Args:
-            indexes (Iterable[TableAdapter]): all indexes to add to respective tables
-
-        Returns:
-            set[TableAdapter]: number of CREATE INDEX statements executed. does not determine if previously created.
-        """
-        if self._conn is None:
-            raise NotConnectedError("Not connected")
-        created = set()
-        for tbl in indexes:
-            if tbl not in created:
-                created.add(tbl)
-                for idx in tbl.sql_table_create_indexes():
-                    self._conn.execute(idx)
-        return created
-
-    def insert_buffer(self, buffer: HBufferB, clear: bool = False) -> int:
-        """inserts multiple items to the database using a buffer. single transaction.
-        wrapper for insert_buffer_class
-        
-        Args:
-            buffer (HBufferB): buffer item to be inserted. 
-            clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
-        
-        Raises:
-            ValueError: buffer adapter is not subclass of SQLAdapter
-            
-        Returns:
-            int: number of new items added to database
-        """
-        return self.insert_buffer_class(buffer=buffer, sql_class=buffer.adapter, clear=clear)
-    
-    def insert_buffer_class(self, buffer: HBufferB, sql_class: SQLAdapter, clear: bool = False):
-        """inserts multiple items to the database using a buffer. single transaction.
-
-        Args:
-            buffer (HBufferB): buffer item to be inserted.
-            sql_class (SQLAdapter): data class to insert into database
-            clear (bool, optional): automatically call clear on buffer when finished. Defaults to False.
-        
-        Raises:
-            InvalidAdapterError: sql_class is not subclass of SQLAdapter
-            NotConnectedError: no connection
-            
-        Returns:
-            int: number of new items added to database
-        """
-        if self._conn is None:
-            raise NotConnectedError("Not connected")
-        if len(buffer) <= 0:
-            return 0
-        sql_class = cast(SQLAdapter, sql_class)
-        inserted = self._conn.executemany(sql_class.sql_insert(), buffer.as_tuples()).rowcount
-        
-        if clear:
-            buffer.clear()
-        
-        return inserted
-    
-    def insert_hashes(self, hash_items: Iterable[SQLAdapter]) -> int:
-        """inserts items one at a time. does not require homogenous items.
-        this is slow for mass inserts. if speed is required use hashbuffers.
-
-        Args:
-            hash_items (Iterable[SQLAdapter]): items to be inserted
-
-        Returns:
-            int: number of new items added to database
-        """
-        if self._conn is None:
-            raise NotConnectedError("Not connected")
-        inserted = 0
-        for itm in hash_items:
-            inserted += self._conn.execute(itm.sql_insert(), itm.as_sql_values()).rowcount
-        return inserted
-
-    def backup_to(self, db_path: str):
-        """WARNING: this will clobber target database contents!
-        copy contents of database to another.
-        useful for creating databases in memory and then copying to disk.
-
-        Args:
-            db_path (str): file path to new database
-        """
-        self.commit()
-        outdb = sqlite3.connect(db_path)
-        self._conn.backup(outdb)
-        outdb.commit()
-        outdb.close()
-    
-    def _merge_to(self, db_path: str):
-        """attempts to insert items from current database into other database.
-        testing/experimental. use at your own risk.
-
-        Args:
-            db_path (str): file path to other database
-        """
-        self.commit()
-        
-        self._conn.execute("ATTACH '" + db_path + "' as dba")
-        self._conn.execute("BEGIN")
-        for row in self._conn.execute("SELECT * FROM sqlite_master WHERE type='table'"):
-            combine = "INSERT OR IGNORE INTO dba."+ row[1] + " SELECT * FROM " + row[1]
-            self._conn.execute(combine)
-        
-        self.commit()
-        self._conn.execute("detach database dba")
-
-    @classmethod
-    def from_rds_list(cls, rds_list: Iterable[str], output_db: str, adapter: ByteAdapter|SQLAdapter|TableAdapter = HashanaDataB) -> int:
-        """creates a hashana sqlite database from the NSRL RDS. it is recommended to use the "minimal" set.
-            This is very slow and requires a lot of memory (20GB+ for all sets) due to tracking duplicates.
-            The duplicate tracking in python was faster than letting sqlite3 get unique values (in testing).
-            Of course, all these recommendations depend heavily on hardware.
-
-        Args:
-            rds_list (Iterable[str]): an iterable list of fiel paths to the NSRL RDS sqlite databases.
-            output_db (str): path to newly created hashana sqlite database
-            adapter (GroupAdapterB): ByteAdapter + SQLAdapter + TableAdapter to transform data for database
-                defaults to HashanaDataB which includes FileSize, MD5, SHA1, SHA256
-
-        Returns:
-            int: number of unique items inserted into database
-        """
-        trackset = set()
-        inserted = 0
-        
-        with cls(output_db) as hashana_db:
-            hashana_db.create_tables([adapter])
-            for i in range(0, len(rds_list)):
-                inserted += hashana_db.import_rds(rds_list[i], adapter=adapter, uniqueset=trackset)
-            hashana_db.commit()
-            hashana_db.create_indexes([adapter])
-        return inserted
 
 
 class HashanaReplier(HashanaDBReader):

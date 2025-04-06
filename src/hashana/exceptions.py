@@ -4,6 +4,9 @@ class InvalidHexError(Exception):
 class NotConnectedError(Exception):
     pass
 
+class InvalidDBModeError(Exception):
+    pass
+
 class InvalidIPAddressError(Exception):
     pass
 
