@@ -988,14 +988,24 @@ class GroupAdapterB(ByteAdapter, SQLAdapter, TableAdapter, CSVAdapter, metaclass
         values should be the repr value of the expected class
         """
         byte_order = kwds.get('byte_order', None)
-        objs = list()
+        intlist = list()
         for c in cls.data_types():
-            c: ByteAdapter = c
-            hexed: str = kwds.get(c.label(), None)
-            if hexed is None:
-                raise KeyError(f"Missing keyword: {c.label()}")
-            objs.append(c.from_hex(hexed))
-        return cls.from_objs(*objs, byte_order=byte_order)
+            c = cast(ByteAdapter, c)
+            kwdobj = kwds.get(c.label(), None)
+            
+            if isinstance(kwdobj, int):
+                o = c.from_ints(kwdobj, byte_order=byte_order)
+            elif isinstance(kwdobj, str):
+                o = c.from_hex(kwdobj, byte_order=byte_order)
+            elif isinstance(kwdobj, bytes):
+                o = c.from_bytes(kwdobj, byte_order=byte_order)
+            elif isinstance(kwdobj, ByteAdapter):
+                o = kwdobj
+            else:
+                raise ValueError(f"{c.label()} must be of type int, str, bytes, or ByteAdapter")
+            
+            intlist.extend(o.as_ints())
+        return cls.from_ints(*intlist, byte_order=byte_order)
     
     @classmethod
     def from_objs(cls, *args, byte_order: str = None):
@@ -1014,7 +1024,7 @@ class GroupAdapterB(ByteAdapter, SQLAdapter, TableAdapter, CSVAdapter, metaclass
                 raise TypeError(f"Argument {i} should be instance of {valid[i].__name__} \
                     but got {type(args[i]).__name__}")
             o: ByteAdapter = args[i]
-            [intlist.append(x) for x in o.as_ints()]
+            intlist.extend(o.as_ints())
         return cls.from_ints(*intlist, byte_order=byte_order)
     
     def as_objs(self) -> Iterator[ByteAdapter]:
@@ -1026,7 +1036,7 @@ class GroupAdapterB(ByteAdapter, SQLAdapter, TableAdapter, CSVAdapter, metaclass
         """
         idx = 0
         for cls in self.data_types():
-            cls: ByteAdapter = cls
+            cls = cast(ByteAdapter, cls)
             end = idx + cls.struct_size(byte_order=self._stored_order)
             yield cls(self._bytes[idx:end], byte_order=self._stored_order)
             idx = end
