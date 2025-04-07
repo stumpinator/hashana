@@ -102,7 +102,7 @@ class HashanaSQLite:
         self._tracking = 0
         self._pathobj = Path(self._path)
         self._readonly = readonly
-        if not readonly and not self._pathobj.exists():
+        if readonly and not self._pathobj.exists():
             raise FileNotFoundError("Path is not a valid file. Turn off readonly mode or choose existing database")
         
     def __enter__(self):
